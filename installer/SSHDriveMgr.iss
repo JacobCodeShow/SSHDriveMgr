@@ -1,4 +1,4 @@
-; SSHDriveMgr Windows installer (Inno Setup 6)
+﻿; SSHDriveMgr Windows installer (Inno Setup 6)
 ;
 ; Builds a Setup.exe from the already-built dist\ executables (run
 ; build_dual.ps1 first). The app version comes from src\version.txt - the
@@ -63,79 +63,78 @@ Name: "de"; MessagesFile: "compiler:Languages\German.isl"
 Name: "es"; MessagesFile: "compiler:Languages\Spanish.isl"
 Name: "ru"; MessagesFile: "compiler:Languages\Russian.isl"
 Name: "nl"; MessagesFile: "compiler:Languages\Dutch.isl"
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 
 [CustomMessages]
 en.AutoStartTask=Start %1 automatically when Windows starts
 de.AutoStartTask=%1 automatisch mit Windows starten
-es.AutoStartTask=Iniciar %1 automáticamente al arrancar Windows
-ru.AutoStartTask=Запускать %1 автоматически при загрузке Windows
+es.AutoStartTask=Iniciar %1 autom獺ticamente al arrancar Windows
+ru.AutoStartTask=?訄郈??郕訄?? %1 訄赲?郋邾訄?邽?迮?郕邽 郈?邽 郱訄迣??郱郕迮 Windows
 nl.AutoStartTask=%1 automatisch starten bij het opstarten van Windows
 
 en.AppPrefsPageCaption=Application Preferences
 de.AppPrefsPageCaption=Anwendungseinstellungen
-es.AppPrefsPageCaption=Preferencias de la aplicación
-ru.AppPrefsPageCaption=Настройки приложения
+es.AppPrefsPageCaption=Preferencias de la aplicaci籀n
+ru.AppPrefsPageCaption=?訄???郋邿郕邽 郈?邽郅郋迠迮郇邽?
 nl.AppPrefsPageCaption=Toepassingsvoorkeuren
 
 en.AppPrefsPageDescription=Choose the language and appearance %1 should start with. You can change these anytime later in the app's Settings.
-de.AppPrefsPageDescription=Wähle die Sprache und das Erscheinungsbild, mit dem %1 starten soll. Diese Auswahl kann jederzeit in den Einstellungen der App geändert werden.
-es.AppPrefsPageDescription=Elige el idioma y la apariencia con la que debe iniciarse %1. Puedes cambiarlos más tarde en los ajustes de la aplicación.
-ru.AppPrefsPageDescription=Выберите язык и оформление, с которыми должно запускаться приложение %1. Позже это можно изменить в настройках приложения.
+de.AppPrefsPageDescription=W瓣hle die Sprache und das Erscheinungsbild, mit dem %1 starten soll. Diese Auswahl kann jederzeit in den Einstellungen der App ge瓣ndert werden.
+es.AppPrefsPageDescription=Elige el idioma y la apariencia con la que debe iniciarse %1. Puedes cambiarlos m獺s tarde en los ajustes de la aplicaci籀n.
+ru.AppPrefsPageDescription=??訇迮?邽?迮 ?郱?郕 邽 郋?郋?邾郅迮郇邽迮, ? 郕郋?郋??邾邽 迡郋郅迠郇郋 郱訄郈??郕訄???? 郈?邽郅郋迠迮郇邽迮 %1. ?郋郱迠迮 ??郋 邾郋迠郇郋 邽郱邾迮郇邽?? 赲 郇訄???郋邿郕訄? 郈?邽郅郋迠迮郇邽?.
 nl.AppPrefsPageDescription=Kies de taal en het uiterlijk waarmee %1 moet starten. Dit kan later altijd worden gewijzigd in de instellingen van de app.
 
 en.AppLanguageLabel=Application language:
 de.AppLanguageLabel=Anwendungssprache:
-es.AppLanguageLabel=Idioma de la aplicación:
-ru.AppLanguageLabel=Язык приложения:
+es.AppLanguageLabel=Idioma de la aplicaci籀n:
+ru.AppLanguageLabel=觓郱?郕 郈?邽郅郋迠迮郇邽?:
 nl.AppLanguageLabel=Applicatietaal:
 
 en.ThemeLabel=Appearance:
 de.ThemeLabel=Erscheinungsbild:
 es.ThemeLabel=Apariencia:
-ru.ThemeLabel=Внешний вид:
+ru.ThemeLabel=?郇迮?郇邽邿 赲邽迡:
 nl.ThemeLabel=Uiterlijk:
 
 en.ThemeDark=Dark
 de.ThemeDark=Dunkel
 es.ThemeDark=Oscuro
-ru.ThemeDark=Тёмная
+ru.ThemeDark=苠?邾郇訄?
 nl.ThemeDark=Donker
 
 en.ThemeLight=Light
 de.ThemeLight=Hell
 es.ThemeLight=Claro
-ru.ThemeLight=Светлая
+ru.ThemeLight=苤赲迮?郅訄?
 nl.ThemeLight=Licht
 
 en.ComponentGui=GUI application (required)
 de.ComponentGui=Grafische Anwendung (erforderlich)
-es.ComponentGui=Aplicación gráfica (obligatoria)
-ru.ComponentGui=Графическое приложение (обязательно)
+es.ComponentGui=Aplicaci籀n gr獺fica (obligatoria)
+ru.ComponentGui=??訄?邽?迮?郕郋迮 郈?邽郅郋迠迮郇邽迮 (郋訇?郱訄?迮郅?郇郋)
 nl.ComponentGui=Grafische toepassing (vereist)
 
 en.ComponentCli=Command-line tool (SSHDriveMgr-cli.exe)
 de.ComponentCli=Kommandozeilen-Tool (SSHDriveMgr-cli.exe)
-es.ComponentCli=Herramienta de línea de comandos (SSHDriveMgr-cli.exe)
-ru.ComponentCli=Инструмент командной строки (SSHDriveMgr-cli.exe)
+es.ComponentCli=Herramienta de l穩nea de comandos (SSHDriveMgr-cli.exe)
+ru.ComponentCli=?郇????邾迮郇? 郕郋邾訄郇迡郇郋邿 ???郋郕邽 (SSHDriveMgr-cli.exe)
 nl.ComponentCli=Opdrachtregeltool (SSHDriveMgr-cli.exe)
 
 en.MyFullInstallation=Full installation
-de.MyFullInstallation=Vollständige Installation
-es.MyFullInstallation=Instalación completa
-ru.MyFullInstallation=Полная установка
+de.MyFullInstallation=Vollst瓣ndige Installation
+es.MyFullInstallation=Instalaci籀n completa
+ru.MyFullInstallation=?郋郅郇訄? ???訄郇郋赲郕訄
 nl.MyFullInstallation=Volledige installatie
 
 en.MyCompactInstallation=Compact installation (GUI only)
 de.MyCompactInstallation=Kompakte Installation (nur GUI)
-es.MyCompactInstallation=Instalación compacta (solo GUI)
-ru.MyCompactInstallation=Компактная установка (только GUI)
+es.MyCompactInstallation=Instalaci籀n compacta (solo GUI)
+ru.MyCompactInstallation=?郋邾郈訄郕?郇訄? ???訄郇郋赲郕訄 (?郋郅?郕郋 GUI)
 nl.MyCompactInstallation=Compacte installatie (alleen GUI)
 
 en.MyCustomInstallation=Custom installation
 de.MyCustomInstallation=Benutzerdefinierte Installation
-es.MyCustomInstallation=Instalación personalizada
-ru.MyCustomInstallation=Выборочная установка
+es.MyCustomInstallation=Instalaci籀n personalizada
+ru.MyCustomInstallation=??訇郋?郋?郇訄? ???訄郇郋赲郕訄
 nl.MyCustomInstallation=Aangepaste installatie
 
 [Types]
@@ -194,10 +193,10 @@ begin
   LangCombo.Width := AppPrefsPage.SurfaceWidth;
   LangCombo.Items.Add('English');
   LangCombo.Items.Add('Deutsch');
-  LangCombo.Items.Add('Español');
-  LangCombo.Items.Add('Русский');
+  LangCombo.Items.Add('Espa簽ol');
+  LangCombo.Items.Add('????郕邽邿');
   LangCombo.Items.Add('Nederlands');
-  LangCombo.Items.Add('العربية');
+  LangCombo.Items.Add('塈?媢堭堥?堜');
   LangCombo.ItemIndex := 0;
 
   ThemeLabel := TNewStaticText.Create(AppPrefsPage);
