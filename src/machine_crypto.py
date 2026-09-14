@@ -32,7 +32,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 # Fixed salt for PBKDF2.  This is NOT a secret — it only needs to be stable
 # so the same fingerprint always derives the same key.  Changing it invalidates
 # all previously stored ciphertext.
-_PBKDF2_SALT = b"neo-ssh-win-manager::machine-bound::v1"
+_PBKDF2_SALT = b"sshdrivemgr::machine-bound::v1"
 _PBKDF2_ITERATIONS = 100_000
 _KEY_LEN = 32  # AES-256
 _NONCE_LEN = 12  # GCM standard nonce size

@@ -252,7 +252,7 @@ def main():
 
     # Windows taskbar icon fix (AppUserModelID)
     try:
-        myappid = f'neo.sshwinmanager.{APP_VERSION}'
+        myappid = f'sshdrivemgr.{APP_VERSION}'
         if os.name == 'nt':
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
     except Exception:

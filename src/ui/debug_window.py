@@ -161,7 +161,7 @@ class DebugWindow(QDialog):
 
     def _save_log(self):
         path, _ = QFileDialog.getSaveFileName(
-            self, tr("debug.save_log"), "sshwinmanager_debug.log",
+            self, tr("debug.save_log"), "sshdrivemgr_debug.log",
             "Log Files (*.log);;All Files (*)"
         )
         if path:
