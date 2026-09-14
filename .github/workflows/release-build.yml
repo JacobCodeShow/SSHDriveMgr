@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing release tag to upload assets to, for example v1.5.0
+        description: Existing release tag to upload assets to, for example v1.0.0
         required: true
         type: string
 
@@ -29,7 +29,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.14'
+          python-version: '3.12'
           cache: pip
 
       - name: Install dependencies
@@ -43,23 +43,32 @@ jobs:
         shell: pwsh
         run: python -m pytest tests -q
 
+      - name: Sync version
+        shell: pwsh
+        run: .\scripts\sync_version.ps1
+
       - name: Build release executables
         shell: pwsh
         run: .\build_dual.ps1
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: winget install --id JRSoftware.InnoSetup -e --source winget --accept-source-agreements --accept-package-agreements
 
       - name: Build Windows installer
         shell: pwsh
         run: |
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          & $iscc installer\NeoSSHWinManager.iss
+          if (-not (Test-Path $iscc)) { $iscc = "C:\Program Files\Inno Setup 6\ISCC.exe" }
+          & $iscc installer\SSHDriveMgr.iss
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
           name: release-executables
           path: |
-            dist/NeoSSHWinManager.exe
-            dist/NeoSSHWinManager-cli.exe
+            dist/SSHDriveMgr.exe
+            dist/SSHDriveMgr-cli.exe
             dist_installer/*.exe
           if-no-files-found: error
 
@@ -77,11 +86,11 @@ jobs:
 
           # sha256sums.txt lets the in-app updater verify the installer it
           # downloads (src/updater.py looks for exactly this asset name).
-          $files = @('.\dist\NeoSSHWinManager.exe', '.\dist\NeoSSHWinManager-cli.exe', $installer)
+          $files = @('.\dist\SSHDriveMgr.exe', '.\dist\SSHDriveMgr-cli.exe', $installer)
           $lines = foreach ($f in $files) {
             $h = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
             "$h  $([System.IO.Path]::GetFileName($f))"
           }
           $lines | Out-File -FilePath sha256sums.txt -Encoding ascii
 
-          gh release upload $env:RELEASE_TAG .\dist\NeoSSHWinManager.exe .\dist\NeoSSHWinManager-cli.exe $installer .\sha256sums.txt --repo $env:GITHUB_REPOSITORY --clobber
+          gh release upload $env:RELEASE_TAG .\dist\SSHDriveMgr.exe .\dist\SSHDriveMgr-cli.exe $installer .\sha256sums.txt --repo $env:GITHUB_REPOSITORY --clobber
