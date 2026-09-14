@@ -50,13 +50,15 @@ jobs:
 
       - name: Install Inno Setup
         shell: pwsh
-        run: winget install --id JRSoftware.InnoSetup -e --source winget --accept-source-agreements --accept-package-agreements
+        run: choco install innosetup -y
 
       - name: Build Windows installer
         shell: pwsh
         run: |
-          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) { $iscc = "C:\Program Files\Inno Setup 6\ISCC.exe" }
+          $iscc = Get-ChildItem "C:\Program Files*\Inno Setup 6\ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $iscc) { $iscc = Get-Command ISCC.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source }
+          if (-not $iscc) { throw "ISCC.exe not found after Inno Setup install" }
+          Write-Host "Using ISCC: $iscc"
           & $iscc installer\SSHDriveMgr.iss
 
       - name: Upload workflow artifacts
