@@ -200,16 +200,15 @@ class AboutDialog(FramelessDialog):
         auth_hdr = QHBoxLayout()
         auth_hdr.setSpacing(8)
         auth_title = _section_label(tr("about.author.section").upper())
-        auth_name = QLabel("Jacob")
-        auth_name.setObjectName("dialogLead")
         auth_hdr.addWidget(auth_title)
-        auth_hdr.addWidget(auth_name)
         auth_hdr.addStretch()
         proj_l.addLayout(auth_hdr)
 
         auth_btns = QHBoxLayout()
         auth_btns.setSpacing(8)
+        jacob_btn = _link_btn("Jacob", _URL_CURRENT_AUTHOR_GH, "👤", "aboutAuthorBtn")
         agb = _link_btn("GitHub (JacobCodeShow)", _URL_CURRENT_AUTHOR_GH, "⌨", "aboutGithubBtn")
+        auth_btns.addWidget(jacob_btn, stretch=1)
         auth_btns.addWidget(agb, stretch=1)
         proj_l.addLayout(auth_btns)
 
