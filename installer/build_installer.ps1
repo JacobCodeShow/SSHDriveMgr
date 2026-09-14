@@ -1,6 +1,6 @@
 # build_installer.ps1
 # Builds the GUI + CLI executables (build_dual.ps1) and then compiles the
-# Windows installer (NeoSSHWinManager.iss) from them with Inno Setup 6.
+# Windows installer (SSHDriveMgr.iss) from them with Inno Setup 6.
 #
 # Requires Inno Setup 6 (ISCC.exe) installed, default path assumed below.
 
@@ -29,18 +29,18 @@ Write-Host "[2/2] Compiling installer..." -ForegroundColor Cyan
 # one (the release workflow picks the first *.exe it finds there).
 $outDir = Join-Path $repoRoot 'dist_installer'
 if (Test-Path $outDir) {
-    Get-ChildItem (Join-Path $outDir 'NeoSSHWinManager-Setup-*.exe') -ErrorAction SilentlyContinue |
+    Get-ChildItem (Join-Path $outDir 'SSHDriveMgr-Setup-*.exe') -ErrorAction SilentlyContinue |
         ForEach-Object {
             Write-Host ("      removing stale installer {0}" -f $_.Name) -ForegroundColor DarkGray
             Remove-Item $_.FullName -Force
         }
 }
 
-& $iscc "$PSScriptRoot\NeoSSHWinManager.iss"
+& $iscc "$PSScriptRoot\SSHDriveMgr.iss"
 
 # The version in the installer name comes from src\version.txt (see the .iss).
 $version = (Get-Content (Join-Path $repoRoot 'src\version.txt') -Raw -Encoding UTF8).Trim()
-$setup = Join-Path $repoRoot "dist_installer\NeoSSHWinManager-Setup-$version.exe"
+$setup = Join-Path $repoRoot "dist_installer\SSHDriveMgr-Setup-$version.exe"
 if (-not (Test-Path $setup)) {
     throw "Expected installer '$setup' was not produced."
 }

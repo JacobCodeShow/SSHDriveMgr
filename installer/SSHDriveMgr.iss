@@ -1,4 +1,4 @@
-; NeoSSHWinManager Windows installer (Inno Setup 6)
+; SSHDriveMgr Windows installer (Inno Setup 6)
 ;
 ; Builds a Setup.exe from the already-built dist\ executables (run
 ; build_dual.ps1 first). The app version comes from src\version.txt - the
@@ -7,15 +7,15 @@
 ; resource matches; the check below fails the compile if it does not (which
 ; means dist\ holds a stale build).
 ;
-; Compile with: ISCC.exe installer\NeoSSHWinManager.iss
+; Compile with: ISCC.exe installer\SSHDriveMgr.iss
 ; (or run installer\build_installer.ps1, which does both steps)
 
-#define MyAppName "NeoSSHWinManager"
-#define MyAppExeName "NeoSSHWinManager.exe"
-#define MyAppCliExeName "NeoSSHWinManager-cli.exe"
-#define MyAppPublisher "Gregor Krebs"
-#define MyAppURL "https://github.com/gregorkrebs/NeoSSHWinManager"
-#define MyAppId "{B4E6F1A2-7C3D-4E5A-9F8B-1D2C3E4F5A6B}"
+#define MyAppName "SSHDriveMgr"
+#define MyAppExeName "SSHDriveMgr.exe"
+#define MyAppCliExeName "SSHDriveMgr-cli.exe"
+#define MyAppPublisher "JacobCodeShow"
+#define MyAppURL "https://github.com/JacobCodeShow/SSHDriveMgr"
+#define MyAppId "{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}"
 
 #define VersionFileHandle FileOpen(SourcePath + "..\src\version.txt")
 #define MyAppVersion Trim(FileRead(VersionFileHandle))
@@ -45,7 +45,7 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 LicenseFile=..\LICENSE
 OutputDir=..\dist_installer
-OutputBaseFilename=NeoSSHWinManager-Setup-{#MyAppVersion}
+OutputBaseFilename=SSHDriveMgr-Setup-{#MyAppVersion}
 SetupIconFile=..\assets\app_icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2/max
@@ -63,6 +63,7 @@ Name: "de"; MessagesFile: "compiler:Languages\German.isl"
 Name: "es"; MessagesFile: "compiler:Languages\Spanish.isl"
 Name: "ru"; MessagesFile: "compiler:Languages\Russian.isl"
 Name: "nl"; MessagesFile: "compiler:Languages\Dutch.isl"
+Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 
 [CustomMessages]
 en.AutoStartTask=Start %1 automatically when Windows starts
@@ -113,11 +114,11 @@ es.ComponentGui=Aplicación gráfica (obligatoria)
 ru.ComponentGui=Графическое приложение (обязательно)
 nl.ComponentGui=Grafische toepassing (vereist)
 
-en.ComponentCli=Command-line tool (NeoSSHWinManager-cli.exe)
-de.ComponentCli=Kommandozeilen-Tool (NeoSSHWinManager-cli.exe)
-es.ComponentCli=Herramienta de línea de comandos (NeoSSHWinManager-cli.exe)
-ru.ComponentCli=Инструмент командной строки (NeoSSHWinManager-cli.exe)
-nl.ComponentCli=Opdrachtregeltool (NeoSSHWinManager-cli.exe)
+en.ComponentCli=Command-line tool (SSHDriveMgr-cli.exe)
+de.ComponentCli=Kommandozeilen-Tool (SSHDriveMgr-cli.exe)
+es.ComponentCli=Herramienta de línea de comandos (SSHDriveMgr-cli.exe)
+ru.ComponentCli=Инструмент командной строки (SSHDriveMgr-cli.exe)
+nl.ComponentCli=Opdrachtregeltool (SSHDriveMgr-cli.exe)
 
 en.MyFullInstallation=Full installation
 de.MyFullInstallation=Vollständige Installation
@@ -234,7 +235,7 @@ var
 begin
   if CurStep = ssPostInstall then
   begin
-    PrefsDir := ExpandConstant('{userappdata}\SSHWinManager');
+    PrefsDir := ExpandConstant('{userappdata}\SSHDriveMgr');
     ForceDirectories(PrefsDir);
     PrefsFile := PrefsDir + '\install_prefs.json';
 
