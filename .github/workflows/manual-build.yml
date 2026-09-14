@@ -1,9 +1,6 @@
-name: Release Build
+name: Manual Build
 
 on:
-  release:
-    types:
-      - published
   workflow_dispatch:
     inputs:
       tag:
@@ -15,7 +12,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-build-${{ github.event.release.tag_name || github.event.inputs.tag || github.ref }}
+  group: manual-build-${{ github.event.inputs.tag || github.ref }}
   cancel-in-progress: false
 
 jobs:
