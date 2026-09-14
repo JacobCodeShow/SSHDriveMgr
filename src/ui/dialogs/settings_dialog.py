@@ -191,7 +191,7 @@ class SettingsDialog(QDialog):
         root.addSpacing(10)
 
         # ── APPEARANCE ────────────────────────────────────────────────
-        root.addWidget(self._section_header("APPEARANCE"))
+        root.addWidget(self._section_header("外观"))
         root.addSpacing(4)
 
         self._lang_combo = NoWheelComboBox()
@@ -208,21 +208,21 @@ class SettingsDialog(QDialog):
 
         # Theme action buttons: import + open folder
         _theme_btn_style = (
-            "QPushButton { background-color: rgba(128,128,128,0.25); "
-            "border: 1px solid rgba(128,128,128,0.5); border-radius: 6px; "
-            "color: inherit; font-size: 14px; font-weight: bold; }"
-            "QPushButton:hover { background-color: rgba(128,128,128,0.4); "
-            "border-color: rgba(128,128,128,0.7); }"
-            "QPushButton:pressed { background-color: rgba(128,128,128,0.5); }"
+            "QPushButton { background-color: #0077b6; "
+            "border: 1px solid #005a8a; border-radius: 6px; "
+            "color: white; font-size: 15px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #0088cc; "
+            "border-color: #0077b6; }"
+            "QPushButton:pressed { background-color: #005a8a; }"
         )
         self._theme_import_btn = QPushButton("+")
-        self._theme_import_btn.setFixedSize(32, 28)
+        self._theme_import_btn.setFixedSize(36, 32)
         self._theme_import_btn.setStyleSheet(_theme_btn_style)
         self._theme_import_btn.setToolTip("Import theme (.qss)")
         self._theme_import_btn.clicked.connect(self._on_import_theme)
 
         self._theme_folder_btn = QPushButton("☰")
-        self._theme_folder_btn.setFixedSize(32, 28)
+        self._theme_folder_btn.setFixedSize(36, 32)
         self._theme_folder_btn.setStyleSheet(_theme_btn_style)
         self._theme_folder_btn.setToolTip("Open themes folder")
         self._theme_folder_btn.clicked.connect(self._on_open_theme_folder)
@@ -270,7 +270,7 @@ class SettingsDialog(QDialog):
         root.addSpacing(14)
 
         # ── UPDATES ───────────────────────────────────────────────────
-        root.addWidget(self._section_header("UPDATES"))
+        root.addWidget(self._section_header("更新"))
         root.addSpacing(4)
 
         self._update_btn = QPushButton("Auf Updates prüfen")
