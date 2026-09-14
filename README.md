@@ -2,7 +2,7 @@
 
 <p align="center">
   一个现代化的 Windows 桌面应用，将远程 SSH 文件系统挂载为 Windows 盘符，集中管理 SSH 访问。<br/>
-  基于 <a href="https://github.com/winfsp/sshfs-win">sshfs-win</a> 和 <a href="https://github.com/winfsp/winfsp">WinFsp</a> 构建。
+  基于 <a href="https://github.com/winfsp/sshfs-win/releases">sshfs-win</a> 和 <a href="https://github.com/winfsp/winfsp/releases">WinFsp</a> 构建。
 </p>
 
 <p align="center">
