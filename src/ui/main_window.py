@@ -3114,7 +3114,7 @@ class MainWindow(FramelessMainWindow):
         v.setSpacing(6)
 
         # ── APPEARANCE ────────────────────────────────────────────────────
-        v.addWidget(_section_hdr("APPEARANCE"))
+        v.addWidget(_section_hdr("外观"))
         v.addSpacing(4)
 
         self._sf_lang = NoWheelComboBox()
@@ -3126,15 +3126,49 @@ class MainWindow(FramelessMainWindow):
             self._sf_lang.setCurrentIndex(idx)
 
         self._sf_theme = NoWheelComboBox()
-        self._sf_theme.setFixedWidth(180)
-        self._sf_theme.addItem(tr("settings.theme.dark"), "dark")
-        self._sf_theme.addItem(tr("settings.theme.light"), "light")
+        self._sf_theme.setFixedWidth(150)
+        from src.theme_manager import get_theme_manager
+        tm = get_theme_manager()
+        for name in sorted(tm.list_themes().keys()):
+            self._sf_theme.addItem(name.capitalize(), name)
         idx = self._sf_theme.findData(getattr(s, 'theme', 'dark') or 'dark')
         if idx >= 0:
             self._sf_theme.setCurrentIndex(idx)
 
+        # Theme action buttons: import + open folder
+        _sf_theme_btn_style = (
+            "QPushButton { background-color: #0077b6; "
+            "border: 1px solid #005a8a; border-radius: 6px; "
+            "color: white; font-size: 15px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #0088cc; "
+            "border-color: #0077b6; }"
+            "QPushButton:pressed { background-color: #005a8a; }"
+        )
+        self._sf_theme_import_btn = QPushButton("+")
+        self._sf_theme_import_btn.setFixedSize(36, 32)
+        self._sf_theme_import_btn.setStyleSheet(_sf_theme_btn_style)
+        self._sf_theme_import_btn.setToolTip("Import theme (.qss)")
+        self._sf_theme_import_btn.clicked.connect(self._sf_import_theme)
+
+        self._sf_theme_folder_btn = QPushButton("\u2630")
+        self._sf_theme_folder_btn.setFixedSize(36, 32)
+        self._sf_theme_folder_btn.setStyleSheet(_sf_theme_btn_style)
+        self._sf_theme_folder_btn.setToolTip("Open themes folder")
+        self._sf_theme_folder_btn.clicked.connect(self._sf_open_theme_folder)
+
         app_card, app_vl = _group_card()
-        app_vl.addWidget(_row_combo(tr("settings.theme.label"), self._sf_theme))
+        theme_row = QWidget()
+        theme_row.setObjectName("settingsRow")
+        theme_hl = QHBoxLayout(theme_row)
+        theme_hl.setContentsMargins(16, 11, 16, 11)
+        theme_hl.setSpacing(8)
+        theme_lbl = QLabel(tr("settings.theme.label"))
+        theme_lbl.setObjectName("rowLabel")
+        theme_hl.addWidget(theme_lbl, stretch=1)
+        theme_hl.addWidget(self._sf_theme)
+        theme_hl.addWidget(self._sf_theme_import_btn)
+        theme_hl.addWidget(self._sf_theme_folder_btn)
+        app_vl.addWidget(theme_row)
         app_vl.addWidget(_inner_sep())
         app_vl.addWidget(_row_combo(tr("settings.language.label"), self._sf_lang))
         app_vl.addWidget(_hint_row(tr("settings.language.restart")))
@@ -3454,6 +3488,33 @@ class MainWindow(FramelessMainWindow):
     def _sf_restart_explorer(self):
         SSHFSController.restart_explorer()
         self._show_inline_message("", tr("settings.explorer_restarted"))
+
+
+    def _sf_import_theme(self):
+        """Import a .qss theme file into the user themes directory."""
+        from PyQt6.QtWidgets import QFileDialog
+        from src.theme_manager import get_theme_manager
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Import Theme", "", "QSS Theme Files (*.qss);;All Files (*)"
+        )
+        if file_path:
+            tm = get_theme_manager()
+            name = tm.import_theme(file_path)
+            if name:
+                # Refresh combo
+                current = self._sf_theme.currentData()
+                self._sf_theme.clear()
+                for n in sorted(tm.list_themes().keys()):
+                    self._sf_theme.addItem(n.capitalize(), n)
+                idx = self._sf_theme.findData(name)
+                if idx >= 0:
+                    self._sf_theme.setCurrentIndex(idx)
+                print(f"[Settings] Imported theme: {name}")
+
+    def _sf_open_theme_folder(self):
+        """Open the user themes directory in the system file explorer."""
+        from src.theme_manager import get_theme_manager
+        get_theme_manager().open_user_theme_dir()
 
     def _sf_create_shortcut(self):
         ok = StyledMessageBox.question(
