@@ -207,13 +207,23 @@ class SettingsDialog(QDialog):
             self._theme_combo.addItem(name.capitalize(), name)
 
         # Theme action buttons: import + open folder
+        _theme_btn_style = (
+            "QPushButton { background-color: rgba(128,128,128,0.25); "
+            "border: 1px solid rgba(128,128,128,0.5); border-radius: 6px; "
+            "color: inherit; font-size: 14px; font-weight: bold; }"
+            "QPushButton:hover { background-color: rgba(128,128,128,0.4); "
+            "border-color: rgba(128,128,128,0.7); }"
+            "QPushButton:pressed { background-color: rgba(128,128,128,0.5); }"
+        )
         self._theme_import_btn = QPushButton("+")
         self._theme_import_btn.setFixedSize(32, 28)
+        self._theme_import_btn.setStyleSheet(_theme_btn_style)
         self._theme_import_btn.setToolTip("Import theme (.qss)")
         self._theme_import_btn.clicked.connect(self._on_import_theme)
 
         self._theme_folder_btn = QPushButton("☰")
         self._theme_folder_btn.setFixedSize(32, 28)
+        self._theme_folder_btn.setStyleSheet(_theme_btn_style)
         self._theme_folder_btn.setToolTip("Open themes folder")
         self._theme_folder_btn.clicked.connect(self._on_open_theme_folder)
 
