@@ -297,7 +297,9 @@ def main():
 
     # Apply global stylesheet
     from src.ui.theme import THEME_COLORS
-    app.setStyleSheet(get_stylesheet("dark").replace("__SURFACE__", THEME_COLORS["dark"]["surface"]))
+    # Apply global stylesheet via ThemeManager
+    from src.theme_manager import get_theme_manager
+    get_theme_manager().apply_theme(app, "dark")
 
     # Setze Palette für native Popups
     from PyQt6.QtGui import QPalette, QColor
@@ -375,7 +377,8 @@ def main():
         app.setLayoutDirection(
             Qt.LayoutDirection.RightToLeft if is_rtl() else Qt.LayoutDirection.LeftToRight
         )
-        app.setStyleSheet(get_stylesheet(user_settings.theme))
+        from src.theme_manager import get_theme_manager
+        get_theme_manager().apply_theme(app, user_settings.theme)
         
     except Exception as e:
         logger.warning(f"Language/theme init failed: {e}")

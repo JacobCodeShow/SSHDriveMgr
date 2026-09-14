@@ -200,14 +200,38 @@ class SettingsDialog(QDialog):
             self._lang_combo.addItem(_LANG_LABELS.get(code, code), code)
 
         self._theme_combo = NoWheelComboBox()
-        self._theme_combo.setFixedWidth(180)
-        self._theme_combo.addItem(tr("settings.theme.dark"), "dark")
-        self._theme_combo.addItem(tr("settings.theme.light"), "light")
+        self._theme_combo.setFixedWidth(160)
+        from src.theme_manager import get_theme_manager
+        tm = get_theme_manager()
+        for name in sorted(tm.list_themes().keys()):
+            self._theme_combo.addItem(name.capitalize(), name)
+
+        # Theme action buttons: import + open folder
+        self._theme_import_btn = QPushButton("+")
+        self._theme_import_btn.setFixedSize(32, 28)
+        self._theme_import_btn.setToolTip("Import theme (.qss)")
+        self._theme_import_btn.clicked.connect(self._on_import_theme)
+
+        self._theme_folder_btn = QPushButton("☰")
+        self._theme_folder_btn.setFixedSize(32, 28)
+        self._theme_folder_btn.setToolTip("Open themes folder")
+        self._theme_folder_btn.clicked.connect(self._on_open_theme_folder)
 
         app_card, app_vl = self._make_group()
         app_vl.addWidget(self._row_combo(tr("settings.language.label"), self._lang_combo))
         app_vl.addWidget(self._inner_sep())
-        app_vl.addWidget(self._row_combo(tr("settings.theme.label"), self._theme_combo))
+        theme_row = QWidget()
+        theme_row.setObjectName("settingsRow")
+        theme_hl = QHBoxLayout(theme_row)
+        theme_hl.setContentsMargins(16, 11, 16, 11)
+        theme_hl.setSpacing(8)
+        theme_lbl = QLabel(tr("settings.theme.label"))
+        theme_lbl.setObjectName("rowLabel")
+        theme_hl.addWidget(theme_lbl, stretch=1)
+        theme_hl.addWidget(self._theme_combo)
+        theme_hl.addWidget(self._theme_import_btn)
+        theme_hl.addWidget(self._theme_folder_btn)
+        app_vl.addWidget(theme_row)
         hint_row = QWidget()
         hint_row.setObjectName("settingsRow")
         hint_hl = QHBoxLayout(hint_row)
@@ -661,3 +685,30 @@ class SettingsDialog(QDialog):
         except Exception as e:
             from src.app_logger import logger
             logger.warning(f"Autostart konnte nicht gesetzt werden: {e}")
+
+    def _on_import_theme(self):
+        """Import a .qss theme file into the user themes directory."""
+        from PyQt6.QtWidgets import QFileDialog
+        from src.theme_manager import get_theme_manager
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Import Theme", "", "QSS Theme Files (*.qss);;All Files (*)"
+        )
+        if file_path:
+            tm = get_theme_manager()
+            name = tm.import_theme(file_path)
+            if name:
+                # Refresh combo
+                current = self._theme_combo.currentData()
+                self._theme_combo.clear()
+                for n in sorted(tm.list_themes().keys()):
+                    self._theme_combo.addItem(n.capitalize(), n)
+                idx = self._theme_combo.findData(name)
+                if idx >= 0:
+                    self._theme_combo.setCurrentIndex(idx)
+                print(f"[Settings] Imported theme: {name}")
+
+    def _on_open_theme_folder(self):
+        """Open the user themes directory in the system file explorer."""
+        from src.theme_manager import get_theme_manager
+        get_theme_manager().open_user_theme_dir()
+

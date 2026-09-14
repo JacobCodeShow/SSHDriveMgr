@@ -4788,9 +4788,9 @@ class MainWindow(FramelessMainWindow):
         if self._poll_timer.interval() != interval:
             self._poll_timer.setInterval(interval)
         self._apply_debug_mode()
-        from src.ui.theme import get_stylesheet
+        from src.theme_manager import get_theme_manager
         theme = s.theme or "dark"
-        QApplication.instance().setStyleSheet(get_stylesheet(theme))
+        get_theme_manager().apply_theme(QApplication.instance(), theme)
         self.set_app_theme(theme)          # update custom titlebar palette
         self._apply_titlebar_color(theme)  # kept for any residual DWM calls
         self._update_header_btn_icons(theme)
