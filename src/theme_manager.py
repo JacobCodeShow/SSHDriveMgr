@@ -81,7 +81,7 @@ class ThemeManager:
 
     def _process_builtin_placeholders(self, content: str, theme_name: str) -> str:
         """Replace built-in placeholders (__CHECKMARK_URL__, etc.)."""
-        icon_dir = Path(__file__).resolve().parent / "assets" / "icons"
+        icon_dir = Path(__file__).resolve().parents[1] / "assets" / "icons"
         checkmark_url = str(icon_dir / "check.svg").replace("\\", "/")
         chevron_url = str(icon_dir / "chevron-down.svg").replace("\\", "/")
 
