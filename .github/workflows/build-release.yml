@@ -34,6 +34,17 @@ jobs:
         shell: powershell
         run: .\build_dual.ps1
 
+      - name: Install Inno Setup
+        shell: powershell
+        run: winget install --id JRSoftware.InnoSetup -e --source winget --accept-source-agreements --accept-package-agreements
+
+      - name: Build installer
+        shell: powershell
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { $iscc = "C:\Program Files\Inno Setup 6\ISCC.exe" }
+          & $iscc ".\installer\SSHDriveMgr.iss"
+
       - name: Create Release and upload assets
         uses: softprops/action-gh-release@v2
         with:
@@ -42,3 +53,4 @@ jobs:
           files: |
             dist/SSHDriveMgr.exe
             dist/SSHDriveMgr-cli.exe
+            dist_installer/SSHDriveMgr-Setup-*.exe
