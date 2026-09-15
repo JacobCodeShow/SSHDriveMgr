@@ -85,12 +85,38 @@ jobs:
           Get-Content sha256sums.txt
 
       - name: Create Release and upload assets
-        uses: softprops/action-gh-release@v2
-        with:
-          name: ${{ github.ref_name }}
-          generate_release_notes: true
-          files: |
-            dist/SSHDriveMgr.exe
-            dist/SSHDriveMgr-cli.exe
-            dist_installer/SSHDriveMgr-Setup-*.exe
-            sha256sums.txt
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $installer = Get-ChildItem dist_installer\*.exe | Select-Object -First 1 -ExpandProperty FullName
+
+          # Create release if not exists, otherwise get existing
+          $release = gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
+          if (-not $release) {
+            Write-Host "Creating release $tag..."
+            gh release create $tag --repo $env:GITHUB_REPOSITORY --title $tag --generate-notes
+          } else {
+            Write-Host "Release $tag already exists, uploading assets..."
+          }
+
+          # Upload assets one by one (more stable than bulk upload)
+          $assets = @(
+            @{ Path = ".\dist\SSHDriveMgr.exe"; Name = "SSHDriveMgr.exe" },
+            @{ Path = ".\dist\SSHDriveMgr-cli.exe"; Name = "SSHDriveMgr-cli.exe" },
+            @{ Path = $installer; Name = (Split-Path $installer -Leaf) },
+            @{ Path = ".\sha256sums.txt"; Name = "sha256sums.txt" }
+          )
+
+          foreach ($asset in $assets) {
+            Write-Host "Uploading $($asset.Name)..."
+            gh release upload $tag $asset.Path --repo $env:GITHUB_REPOSITORY --clobber
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "Retry uploading $($asset.Name)..."
+              Start-Sleep -Seconds 5
+              gh release upload $tag $asset.Path --repo $env:GITHUB_REPOSITORY --clobber
+            }
+          }
+
+          Write-Host "All assets uploaded successfully."
