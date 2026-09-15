@@ -71,6 +71,19 @@ jobs:
           Write-Host "=== Installer output ==="
           Get-ChildItem dist_installer -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.Name): $([math]::Round($_.Length/1MB, 2)) MB" }
 
+      - name: Generate sha256sums
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem dist_installer\*.exe | Select-Object -First 1 -ExpandProperty FullName
+          $files = @('.\dist\SSHDriveMgr.exe', '.\dist\SSHDriveMgr-cli.exe', $installer)
+          $lines = foreach ($f in $files) {
+            $h = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
+            "$h  $([System.IO.Path]::GetFileName($f))"
+          }
+          $lines | Out-File -FilePath sha256sums.txt -Encoding ascii
+          Write-Host "=== sha256sums.txt ==="
+          Get-Content sha256sums.txt
+
       - name: Create Release and upload assets
         uses: softprops/action-gh-release@v2
         with:
@@ -80,3 +93,4 @@ jobs:
             dist/SSHDriveMgr.exe
             dist/SSHDriveMgr-cli.exe
             dist_installer/SSHDriveMgr-Setup-*.exe
+            sha256sums.txt
