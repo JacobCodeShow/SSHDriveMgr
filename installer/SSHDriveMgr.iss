@@ -165,10 +165,10 @@ begin
   LangCombo.Width := AppPrefsPage.SurfaceWidth;
   LangCombo.Items.Add('English');
   LangCombo.Items.Add('Deutsch');
-  LangCombo.Items.Add('Espa簽ol');
-  LangCombo.Items.Add('????郕邽邿');
+  LangCombo.Items.Add('Español');
+  LangCombo.Items.Add('Русский');
   LangCombo.Items.Add('Nederlands');
-  LangCombo.Items.Add('塈?媢堭堥?堜');
+  LangCombo.Items.Add('العربية');
   LangCombo.ItemIndex := 0;
 
   ThemeLabel := TNewStaticText.Create(AppPrefsPage);
