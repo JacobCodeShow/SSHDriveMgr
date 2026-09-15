@@ -67,75 +67,51 @@ Name: "nl"; MessagesFile: "compiler:Languages\Dutch.isl"
 [CustomMessages]
 en.AutoStartTask=Start %1 automatically when Windows starts
 de.AutoStartTask=%1 automatisch mit Windows starten
-es.AutoStartTask=Iniciar %1 autom獺ticamente al arrancar Windows
-ru.AutoStartTask=?訄郈??郕訄?? %1 訄赲?郋邾訄?邽?迮?郕邽 郈?邽 郱訄迣??郱郕迮 Windows
+es.AutoStartTask=Iniciar %1 automáticamente al arrancar Windows
+ru.AutoStartTask=Запускать %1 автоматически при запуске Windows
 nl.AutoStartTask=%1 automatisch starten bij het opstarten van Windows
 
 en.AppPrefsPageCaption=Application Preferences
 de.AppPrefsPageCaption=Anwendungseinstellungen
-es.AppPrefsPageCaption=Preferencias de la aplicaci籀n
-ru.AppPrefsPageCaption=?訄???郋邿郕邽 郈?邽郅郋迠迮郇邽?
+es.AppPrefsPageCaption=Preferencias de la aplicación
+ru.AppPrefsPageCaption=Настройки приложения
 nl.AppPrefsPageCaption=Toepassingsvoorkeuren
 
 en.AppPrefsPageDescription=Choose the language and appearance %1 should start with. You can change these anytime later in the app's Settings.
-de.AppPrefsPageDescription=W瓣hle die Sprache und das Erscheinungsbild, mit dem %1 starten soll. Diese Auswahl kann jederzeit in den Einstellungen der App ge瓣ndert werden.
-es.AppPrefsPageDescription=Elige el idioma y la apariencia con la que debe iniciarse %1. Puedes cambiarlos m獺s tarde en los ajustes de la aplicaci籀n.
-ru.AppPrefsPageDescription=??訇迮?邽?迮 ?郱?郕 邽 郋?郋?邾郅迮郇邽迮, ? 郕郋?郋??邾邽 迡郋郅迠郇郋 郱訄郈??郕訄???? 郈?邽郅郋迠迮郇邽迮 %1. ?郋郱迠迮 ??郋 邾郋迠郇郋 邽郱邾迮郇邽?? 赲 郇訄???郋邿郕訄? 郈?邽郅郋迠迮郇邽?.
+de.AppPrefsPageDescription=Wählen Sie die Sprache und das Erscheinungsbild, mit dem %1 starten soll. Diese Auswahl kann jederzeit in den Einstellungen der App geändert werden.
+es.AppPrefsPageDescription=Elige el idioma y la apariencia con la que debe iniciarse %1. Puedes cambiarlos más tarde en los ajustes de la aplicación.
+ru.AppPrefsPageDescription=Выберите язык и внешний вид, с которыми должен запускаться %1. Вы можете изменить это в любое время в настройках приложения.
 nl.AppPrefsPageDescription=Kies de taal en het uiterlijk waarmee %1 moet starten. Dit kan later altijd worden gewijzigd in de instellingen van de app.
 
 en.AppLanguageLabel=Application language:
 de.AppLanguageLabel=Anwendungssprache:
-es.AppLanguageLabel=Idioma de la aplicaci籀n:
-ru.AppLanguageLabel=觓郱?郕 郈?邽郅郋迠迮郇邽?:
+es.AppLanguageLabel=Idioma de la aplicación:
+ru.AppLanguageLabel=Язык приложения:
 nl.AppLanguageLabel=Applicatietaal:
 
 en.ThemeLabel=Appearance:
 de.ThemeLabel=Erscheinungsbild:
 es.ThemeLabel=Apariencia:
-ru.ThemeLabel=?郇迮?郇邽邿 赲邽迡:
-nl.ThemeLabel=Uiterlijk:
+ru.ThemeLabel=Внешний вид:
+nl.ThemeLabel=Weergave:
 
 en.ThemeDark=Dark
 de.ThemeDark=Dunkel
 es.ThemeDark=Oscuro
-ru.ThemeDark=苠?邾郇訄?
+ru.ThemeDark=Тёмная
 nl.ThemeDark=Donker
 
 en.ThemeLight=Light
 de.ThemeLight=Hell
 es.ThemeLight=Claro
-ru.ThemeLight=苤赲迮?郅訄?
+ru.ThemeLight=Светлая
 nl.ThemeLight=Licht
 
-en.ComponentGui=GUI application (required)
-de.ComponentGui=Grafische Anwendung (erforderlich)
-es.ComponentGui=Aplicaci籀n gr獺fica (obligatoria)
-ru.ComponentGui=??訄?邽?迮?郕郋迮 郈?邽郅郋迠迮郇邽迮 (郋訇?郱訄?迮郅?郇郋)
-nl.ComponentGui=Grafische toepassing (vereist)
-
-en.ComponentCli=Command-line tool (SSHDriveMgr-cli.exe)
-de.ComponentCli=Kommandozeilen-Tool (SSHDriveMgr-cli.exe)
-es.ComponentCli=Herramienta de l穩nea de comandos (SSHDriveMgr-cli.exe)
-ru.ComponentCli=?郇????邾迮郇? 郕郋邾訄郇迡郇郋邿 ???郋郕邽 (SSHDriveMgr-cli.exe)
-nl.ComponentCli=Opdrachtregeltool (SSHDriveMgr-cli.exe)
-
-en.MyFullInstallation=Full installation
-de.MyFullInstallation=Vollst瓣ndige Installation
-es.MyFullInstallation=Instalaci籀n completa
-ru.MyFullInstallation=?郋郅郇訄? ???訄郇郋赲郕訄
-nl.MyFullInstallation=Volledige installatie
-
-en.MyCompactInstallation=Compact installation (GUI only)
-de.MyCompactInstallation=Kompakte Installation (nur GUI)
-es.MyCompactInstallation=Instalaci籀n compacta (solo GUI)
-ru.MyCompactInstallation=?郋邾郈訄郕?郇訄? ???訄郇郋赲郕訄 (?郋郅?郕郋 GUI)
-nl.MyCompactInstallation=Compacte installatie (alleen GUI)
-
-en.MyCustomInstallation=Custom installation
-de.MyCustomInstallation=Benutzerdefinierte Installation
-es.MyCustomInstallation=Instalaci籀n personalizada
-ru.MyCustomInstallation=??訇郋?郋?郇訄? ???訄郇郋赲郕訄
-nl.MyCustomInstallation=Aangepaste installatie
+en.FinishLabel=Finish
+de.FinishLabel=Fertigstellen
+es.FinishLabel=Finalizar
+ru.FinishLabel=Завершить
+nl.FinishLabel=Voltooien
 
 [Types]
 Name: "full"; Description: "{cm:MyFullInstallation}"
