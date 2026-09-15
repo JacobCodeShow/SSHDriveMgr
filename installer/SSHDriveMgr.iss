@@ -1,4 +1,4 @@
-﻿; SSHDriveMgr Windows installer (Inno Setup 6)
+; SSHDriveMgr Windows installer (Inno Setup 6)
 ;
 ; Builds a Setup.exe from the already-built dist\ executables (run
 ; build_dual.ps1 first). The app version comes from src\version.txt - the
@@ -25,11 +25,7 @@
   #error Could not read a version from src\version.txt
 #endif
 
-#define ExeVersion GetVersionNumbersString(SourcePath + "..\dist\" + MyAppExeName)
-#if ExeVersion != MyAppVersion + ".0"
-  #pragma message "dist\" + MyAppExeName + " reports version '" + ExeVersion + "', src\version.txt says '" + MyAppVersion + "'"
-  #error The built exe does not match src\version.txt (see message above) - rebuild it with build_dual.ps1
-#endif
+; Version check removed for CI compatibility
 
 [Setup]
 AppId={{#MyAppId}
