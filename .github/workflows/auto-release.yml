@@ -55,16 +55,19 @@ jobs:
       - name: Build installer
         shell: pwsh
         run: |
-          Write-Host "=== Inno Setup locations ==="
-          Get-ChildItem "C:\Program Files*\Inno Setup 6" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  Found: $($_.FullName)" }
           $iscc = Get-ChildItem "C:\Program Files*\Inno Setup 6\ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
           if (-not $iscc) { $iscc = Get-Command ISCC.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source }
-          if (-not $iscc) { throw "ISCC.exe not found after Inno Setup install" }
+          if (-not $iscc) { throw "ISCC.exe not found" }
           Write-Host "Using ISCC: $iscc"
-          Write-Host "=== Languages available ==="
-          Get-ChildItem (Split-Path $iscc)\Languages -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.Name)" }
-          & $iscc ".\installer\SSHDriveMgr.iss"
-          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+          Write-Host "=== Running ISCC ==="
+          & $iscc ".\installer\SSHDriveMgr.iss" 2>&1 | Tee-Object -FilePath iscc_log.txt
+          $exitCode = $LASTEXITCODE
+          Write-Host "=== ISCC exit code: $exitCode ==="
+          if ($exitCode -ne 0) {
+            Write-Host "=== ISCC full log ==="
+            Get-Content iscc_log.txt -ErrorAction SilentlyContinue
+            throw "ISCC failed with exit code $exitCode"
+          }
           Write-Host "=== Installer output ==="
           Get-ChildItem dist_installer -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.Name): $([math]::Round($_.Length/1MB, 2)) MB" }
 
