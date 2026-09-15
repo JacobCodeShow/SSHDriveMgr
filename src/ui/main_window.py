@@ -3114,7 +3114,7 @@ class MainWindow(FramelessMainWindow):
         v.setSpacing(6)
 
         # ── APPEARANCE ────────────────────────────────────────────────────
-        v.addWidget(_section_hdr("外观"))
+        v.addWidget(_section_hdr(tr("settings.section.appearance")))
         v.addSpacing(4)
 
         self._sf_lang = NoWheelComboBox()
@@ -3134,27 +3134,29 @@ class MainWindow(FramelessMainWindow):
         idx = self._sf_theme.findData(getattr(s, 'theme', 'dark') or 'dark')
         if idx >= 0:
             self._sf_theme.setCurrentIndex(idx)
+        self._sf_theme.currentIndexChanged.connect(self._sf_on_theme_changed)
 
-        # Theme action buttons: import + open folder
+        # Theme action button: menu with import + open folder
+        from PyQt6.QtWidgets import QToolButton, QMenu
         _sf_theme_btn_style = (
-            "QPushButton { background-color: #0077b6; "
+            "QToolButton { background-color: #0077b6; "
             "border: 1px solid #005a8a; border-radius: 6px; "
             "color: white; font-size: 15px; font-weight: bold; }"
-            "QPushButton:hover { background-color: #0088cc; "
+            "QToolButton:hover { background-color: #0088cc; "
             "border-color: #0077b6; }"
-            "QPushButton:pressed { background-color: #005a8a; }"
+            "QToolButton:pressed { background-color: #005a8a; }"
+            "QToolButton::menu-indicator { image: none; }"
         )
-        self._sf_theme_import_btn = QPushButton("+")
-        self._sf_theme_import_btn.setFixedSize(36, 32)
-        self._sf_theme_import_btn.setStyleSheet(_sf_theme_btn_style)
-        self._sf_theme_import_btn.setToolTip("Import theme (.qss)")
-        self._sf_theme_import_btn.clicked.connect(self._sf_import_theme)
-
-        self._sf_theme_folder_btn = QPushButton("\u2630")
-        self._sf_theme_folder_btn.setFixedSize(36, 32)
-        self._sf_theme_folder_btn.setStyleSheet(_sf_theme_btn_style)
-        self._sf_theme_folder_btn.setToolTip("Open themes folder")
-        self._sf_theme_folder_btn.clicked.connect(self._sf_open_theme_folder)
+        self._sf_theme_menu_btn = QToolButton()
+        self._sf_theme_menu_btn.setText("\u22ee")
+        self._sf_theme_menu_btn.setFixedSize(36, 32)
+        self._sf_theme_menu_btn.setStyleSheet(_sf_theme_btn_style)
+        self._sf_theme_menu_btn.setToolTip(tr("settings.theme.actions"))
+        self._sf_theme_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        _sf_theme_menu = QMenu(self._sf_theme_menu_btn)
+        _sf_theme_menu.addAction(tr("settings.theme.import"), self._sf_import_theme)
+        _sf_theme_menu.addAction(tr("settings.theme.open_folder"), self._sf_open_theme_folder)
+        self._sf_theme_menu_btn.setMenu(_sf_theme_menu)
 
         app_card, app_vl = _group_card()
         theme_row = QWidget()
@@ -3166,8 +3168,7 @@ class MainWindow(FramelessMainWindow):
         theme_lbl.setObjectName("rowLabel")
         theme_hl.addWidget(theme_lbl, stretch=1)
         theme_hl.addWidget(self._sf_theme)
-        theme_hl.addWidget(self._sf_theme_import_btn)
-        theme_hl.addWidget(self._sf_theme_folder_btn)
+        theme_hl.addWidget(self._sf_theme_menu_btn)
         app_vl.addWidget(theme_row)
         app_vl.addWidget(_inner_sep())
         app_vl.addWidget(_row_combo(tr("settings.language.label"), self._sf_lang))
@@ -3226,10 +3227,67 @@ class MainWindow(FramelessMainWindow):
         v.addWidget(_section_hdr(tr("settings.section.mount")))
         v.addSpacing(4)
 
-        self._sf_interval = NoWheelSpinBox()
-        self._sf_interval.setRange(5, 300)
-        self._sf_interval.setValue(s.check_interval_seconds)
-        self._sf_interval.setFixedWidth(72)
+        self._sf_interval_unit = NoWheelComboBox()
+        self._sf_interval_unit.setFixedWidth(90)
+        self._sf_interval_unit.addItem(tr("settings.interval.seconds"), "s")
+        self._sf_interval_unit.addItem(tr("settings.interval.minutes"), "m")
+        self._sf_interval_unit.addItem(tr("settings.interval.hours"), "h")
+        # Capsule-style stepper: [-] [value] [+]
+        self._sf_interval_stepper = QWidget()
+        self._sf_interval_stepper.setObjectName("intervalStepper")
+        self._sf_interval_stepper.setFixedHeight(32)
+        _stepper_hl = QHBoxLayout(self._sf_interval_stepper)
+        _stepper_hl.setContentsMargins(0, 0, 0, 0)
+        _stepper_hl.setSpacing(0)
+        _stepper_btn_style = (
+            "QPushButton { background-color: #f0f0f0; border: none; "
+            "color: #555; font-size: 16px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #e0e0e0; color: #0077b6; }"
+            "QPushButton:pressed { background-color: #d0d0d0; }"
+            "QPushButton#intervalMinusBtn { border-top-left-radius: 16px; "
+            "border-bottom-left-radius: 16px; }"
+            "QPushButton#intervalPlusBtn { border-top-right-radius: 16px; "
+            "border-bottom-right-radius: 16px; }"
+        )
+        self._sf_interval_minus_btn = QPushButton("-")
+        self._sf_interval_minus_btn.setObjectName("intervalMinusBtn")
+        self._sf_interval_minus_btn.setFixedSize(36, 32)
+        self._sf_interval_minus_btn.setStyleSheet(_stepper_btn_style)
+        self._sf_interval_minus_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._sf_interval_value = NoWheelSpinBox()
+        self._sf_interval_value.setFixedWidth(60)
+        self._sf_interval_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._sf_interval_value.setStyleSheet(
+            "QSpinBox { background-color: white; border: none; "
+            "color: #333; font-size: 14px; font-weight: bold; "
+            "padding: 0px; }"
+            "QSpinBox::up-button, QSpinBox::down-button { width: 0px; height: 0px; }"
+        )
+        self._sf_interval_plus_btn = QPushButton("+")
+        self._sf_interval_plus_btn.setObjectName("intervalPlusBtn")
+        self._sf_interval_plus_btn.setFixedSize(36, 32)
+        self._sf_interval_plus_btn.setStyleSheet(_stepper_btn_style)
+        self._sf_interval_plus_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        _stepper_hl.addWidget(self._sf_interval_minus_btn)
+        _stepper_hl.addWidget(self._sf_interval_value)
+        _stepper_hl.addWidget(self._sf_interval_plus_btn)
+        self._sf_interval_minus_btn.clicked.connect(self._sf_interval_value.stepDown)
+        self._sf_interval_plus_btn.clicked.connect(self._sf_interval_value.stepUp)
+        # Convert seconds to best unit
+        _secs = getattr(s, 'check_interval_seconds', 30) or 30
+        if _secs >= 3600 and _secs % 3600 == 0:
+            self._sf_interval_unit.setCurrentIndex(2)
+            self._sf_interval_value.setRange(1, 24)
+            self._sf_interval_value.setValue(_secs // 3600)
+        elif _secs >= 60 and _secs % 60 == 0:
+            self._sf_interval_unit.setCurrentIndex(1)
+            self._sf_interval_value.setRange(1, 60)
+            self._sf_interval_value.setValue(_secs // 60)
+        else:
+            self._sf_interval_unit.setCurrentIndex(0)
+            self._sf_interval_value.setRange(1, 3600)
+            self._sf_interval_value.setValue(min(_secs, 3600))
+        self._sf_interval_unit.currentIndexChanged.connect(self._sf_on_interval_unit_changed)
         self._sf_auto_reconnect = QCheckBox(tr("settings.auto_reconnect"))
         self._sf_auto_reconnect.setChecked(getattr(s, "auto_reconnect", False))
         self._sf_auto_remount = QCheckBox(tr("settings.auto_remount"))
@@ -3238,7 +3296,17 @@ class MainWindow(FramelessMainWindow):
         self._sf_sshfs_disable_cache.setChecked(getattr(s, "sshfs_disable_cache", False))
 
         mnt_card, mnt_vl = _group_card()
-        mnt_vl.addWidget(_row_combo(tr("settings.check_interval"), self._sf_interval))
+        interval_row = QWidget()
+        interval_row.setObjectName("settingsRow")
+        interval_hl = QHBoxLayout(interval_row)
+        interval_hl.setContentsMargins(16, 11, 16, 11)
+        interval_hl.setSpacing(8)
+        interval_lbl = QLabel(tr("settings.check_interval"))
+        interval_lbl.setObjectName("rowLabel")
+        interval_hl.addWidget(interval_lbl, stretch=1)
+        interval_hl.addWidget(self._sf_interval_stepper)
+        interval_hl.addWidget(self._sf_interval_unit)
+        mnt_vl.addWidget(interval_row)
         mnt_vl.addWidget(_inner_sep())
         mnt_vl.addWidget(_row_check(self._sf_auto_reconnect))
         mnt_vl.addWidget(_inner_sep())
@@ -3403,6 +3471,35 @@ class MainWindow(FramelessMainWindow):
         v.addStretch()
         self._fs_layout.addWidget(body)
 
+    def _sf_get_interval_seconds(self) -> int:
+        """Convert interval value + unit to seconds."""
+        try:
+            value = self._sf_interval_value.value()
+            unit = self._sf_interval_unit.currentData()
+            if unit == "h":
+                return value * 3600
+            elif unit == "m":
+                return value * 60
+            return value
+        except Exception:
+            return 30
+
+    def _sf_on_interval_unit_changed(self, index: int):
+        """Adjust spinbox range when unit changes."""
+        unit = self._sf_interval_unit.itemData(index)
+        if unit == "h":
+            self._sf_interval_value.setRange(1, 24)
+            if self._sf_interval_value.value() > 24:
+                self._sf_interval_value.setValue(24)
+        elif unit == "m":
+            self._sf_interval_value.setRange(1, 60)
+            if self._sf_interval_value.value() > 60:
+                self._sf_interval_value.setValue(60)
+        else:
+            self._sf_interval_value.setRange(1, 3600)
+            if self._sf_interval_value.value() > 3600:
+                self._sf_interval_value.setValue(3600)
+
     def _sf_check_updates(self):
         """Manual update check from settings screen."""
         try:
@@ -3490,12 +3587,25 @@ class MainWindow(FramelessMainWindow):
         self._show_inline_message("", tr("settings.explorer_restarted"))
 
 
+    def _sf_on_theme_changed(self, index: int):
+        """Apply theme immediately when user selects from dropdown (live preview)."""
+        theme_name = self._sf_theme.itemData(index)
+        if theme_name:
+            from PyQt6.QtWidgets import QApplication
+            from src.theme_manager import get_theme_manager
+            app = QApplication.instance()
+            if app:
+                get_theme_manager().apply_theme(app, theme_name)
+            if hasattr(self, '_mgr'):
+                s = self._mgr.get_settings()
+                s.theme = theme_name
+
     def _sf_import_theme(self):
         """Import a .qss theme file into the user themes directory."""
         from PyQt6.QtWidgets import QFileDialog
         from src.theme_manager import get_theme_manager
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Import Theme", "", "QSS Theme Files (*.qss);;All Files (*)"
+            self, tr("settings.theme.import_title"), "", "QSS Theme Files (*.qss);;All Files (*)"
         )
         if file_path:
             tm = get_theme_manager()
@@ -3751,7 +3861,7 @@ class MainWindow(FramelessMainWindow):
             "start": self._safe_bool_checked("_sf_start", False),
             "tray": self._safe_bool_checked("_sf_tray", False),
             "admin": self._safe_bool_checked("_sf_admin", False),
-            "interval": self._safe_spin_value("_sf_interval", 30),
+            "interval": self._sf_get_interval_seconds(),
             "auto_reconnect": self._safe_bool_checked("_sf_auto_reconnect", False),
             "auto_remount": self._safe_bool_checked("_sf_auto_remount", True),
             "disable_cache": self._safe_bool_checked("_sf_sshfs_disable_cache", False),
@@ -4078,7 +4188,7 @@ class MainWindow(FramelessMainWindow):
             start_with_windows=self._sf_start.isChecked(),
             minimize_to_tray=self._sf_tray.isChecked(),
             require_admin=self._sf_admin.isChecked(),
-            check_interval_seconds=self._sf_interval.value(),
+            check_interval_seconds=self._sf_get_interval_seconds(),
             auto_reconnect=self._sf_auto_reconnect.isChecked(),
             auto_remount_on_lost=self._sf_auto_remount.isChecked(),
             auto_reconnect_mounts=self._sf_auto_reconnect.isChecked(),

@@ -120,7 +120,7 @@
   "settings.check_updates_running": "Buscando…",
   "settings.up_to_date": "Ya tienes la última versión.",
   "settings.update_check_failed": "Error al buscar actualizaciones: {msg}",
-  "settings.check_interval": "Intervalo de comprobación (segundos):",
+  "settings.check_interval": "Intervalo de comprobación:",
   "settings.auto_reconnect": "Conectar automáticamente al iniciar",
   "settings.auto_remount": "Reconectar automáticamente al perder la conexión",
   "settings.sshfs_disable_cache": "Desactivar la caché de directorios (actualización inmediata)",
@@ -494,5 +494,13 @@
   "card.menu.copy": "Copiar conexión (Ctrl+C)",
   "card.menu.paste": "Pegar conexión (Ctrl+V)",
   "login.remember_password": "Recordar contraseña",
-  "login.signing_in": "Iniciando sesión..."
+  "login.signing_in": "Iniciando sesión...",
+  "settings.section.appearance": "APARIENCIA",
+  "settings.theme.import": "Importar tema (.qss)",
+  "settings.theme.open_folder": "Abrir carpeta de temas",
+  "settings.theme.actions": "Acciones de tema",
+  "settings.theme.import_title": "Importar tema",
+  "settings.interval.seconds": "segundos",
+  "settings.interval.minutes": "minutos",
+  "settings.interval.hours": "horas"
 }

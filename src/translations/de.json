@@ -120,7 +120,7 @@
   "settings.check_updates_running": "Prüfe…",
   "settings.up_to_date": "Du bist auf dem neuesten Stand!",
   "settings.update_check_failed": "Fehler bei der Update-Prüfung: {msg}",
-  "settings.check_interval": "Prüfintervall (Sekunden):",
+  "settings.check_interval": "Prüfintervall:",
   "settings.auto_reconnect": "Beim Start automatisch verbinden",
   "settings.auto_remount": "Automatisch neu verbinden bei Verbindungsverlust",
   "settings.sshfs_disable_cache": "Verzeichnis-Cache deaktivieren (sofortiger Refresh)",
@@ -494,5 +494,13 @@
   "card.menu.copy": "Verbindung kopieren (Strg+C)",
   "card.menu.paste": "Verbindung einfügen (Strg+V)",
   "login.remember_password": "Passwort merken",
-  "login.signing_in": "Anmeldung..."
+  "login.signing_in": "Anmeldung...",
+  "settings.section.appearance": "DARSTELLUNG",
+  "settings.theme.import": "Theme importieren (.qss)",
+  "settings.theme.open_folder": "Theme-Ordner öffnen",
+  "settings.theme.actions": "Theme-Aktionen",
+  "settings.theme.import_title": "Theme importieren",
+  "settings.interval.seconds": "Sekunden",
+  "settings.interval.minutes": "Minuten",
+  "settings.interval.hours": "Stunden"
 }

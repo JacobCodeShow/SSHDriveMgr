@@ -120,7 +120,7 @@
   "settings.check_updates_running": "جارٍ البحث…",
   "settings.up_to_date": "لديك أحدث إصدار.",
   "settings.update_check_failed": "فشل البحث عن التحديثات: {msg}",
-  "settings.check_interval": "فترة الفحص (بالثواني):",
+  "settings.check_interval": "فترة الفحص:",
   "settings.auto_reconnect": "الاتصال تلقائياً عند بدء التشغيل",
   "settings.auto_remount": "إعادة الاتصال تلقائياً عند انقطاع الاتصال",
   "settings.sshfs_disable_cache": "تعطيل ذاكرة التخزين المؤقت للمجلدات (تحديث فوري)",
@@ -494,5 +494,13 @@
   "card.menu.copy": "نسخ الاتصال (Ctrl+C)",
   "card.menu.paste": "لصق الاتصال (Ctrl+V)",
   "login.remember_password": "تذكر كلمة المرور",
-  "login.signing_in": "جاري تسجيل الدخول..."
+  "login.signing_in": "جاري تسجيل الدخول...",
+  "settings.section.appearance": "المظهر",
+  "settings.theme.import": "استيراد سمة (.qss)",
+  "settings.theme.open_folder": "فتح مجلد السمات",
+  "settings.theme.actions": "إجراءات السمة",
+  "settings.theme.import_title": "استيراد سمة",
+  "settings.interval.seconds": "ثواني",
+  "settings.interval.minutes": "دقائق",
+  "settings.interval.hours": "ساعات"
 }

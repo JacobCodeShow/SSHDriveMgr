@@ -32,7 +32,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from src.app_logger import logger
 
-GITHUB_API_URL = "https://api.github.com/repos/gregorkrebs/sshdrivemgr/releases/latest"
+GITHUB_API_URL = "https://api.github.com/repos/JacobCodeShow/SSHDriveMgr/releases/latest"
 
 # Characters that would break out of a quoted path inside the generated .cmd
 # helper (or let it run something else entirely).

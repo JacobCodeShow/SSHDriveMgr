@@ -275,6 +275,16 @@ def main():
 
     _install_global_exception_handlers()
 
+    # Filter harmless Qt font warnings
+    from PyQt6.QtCore import QtMsgType, qInstallMessageHandler
+    _original_handler = qInstallMessageHandler(None)
+    def _qt_message_handler(mode, context, message):
+        if mode == QtMsgType.QtWarningMsg and "Point size <= 0" in message:
+            return
+        if _original_handler:
+            _original_handler(mode, context, message)
+    qInstallMessageHandler(_qt_message_handler)
+
     def get_resource_path(relative_path):
         if hasattr(sys, '_MEIPASS'):
             return os.path.join(sys._MEIPASS, relative_path)

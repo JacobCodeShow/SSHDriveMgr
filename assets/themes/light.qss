@@ -1270,7 +1270,24 @@ QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
     border: 1px solid #0077b6;
     background-color: #f5faff;
 }
-QLineEdit::placeholder { color: #9aacbe; }
+
+
+QSpinBox {
+    padding-right: 8px;
+}
+QSpinBox::up-button, QSpinBox::down-button {
+    width: 0px;
+    height: 0px;
+    border: none;
+    background: transparent;
+}
+QSpinBox::up-arrow, QSpinBox::down-arrow {
+    width: 0px;
+    height: 0px;
+    image: none;
+    border: none;
+}
+
 QComboBox::drop-down { border: none; width: 30px; }
 QComboBox::down-arrow {
     image: url("__CHEVRON_URL__");

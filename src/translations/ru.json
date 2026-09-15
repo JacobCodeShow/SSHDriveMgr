@@ -120,7 +120,7 @@
   "settings.check_updates_running": "Проверка…",
   "settings.up_to_date": "У вас последняя версия.",
   "settings.update_check_failed": "Не удалось проверить обновления: {msg}",
-  "settings.check_interval": "Интервал проверки (секунды):",
+  "settings.check_interval": "Интервал проверки:",
   "settings.auto_reconnect": "Подключать автоматически при запуске",
   "settings.auto_remount": "Автоматически переподключаться при потере связи",
   "settings.sshfs_disable_cache": "Отключить кэш каталогов (мгновенное обновление)",
@@ -494,5 +494,13 @@
   "card.menu.copy": "Копировать подключение (Ctrl+C)",
   "card.menu.paste": "Вставить подключение (Ctrl+V)",
   "login.remember_password": "Запомнить пароль",
-  "login.signing_in": "Вход..."
+  "login.signing_in": "Вход...",
+  "settings.section.appearance": "ВНЕШНИЙ ВИД",
+  "settings.theme.import": "Импорт темы (.qss)",
+  "settings.theme.open_folder": "Открыть папку тем",
+  "settings.theme.actions": "Действия с темой",
+  "settings.theme.import_title": "Импорт темы",
+  "settings.interval.seconds": "секунд",
+  "settings.interval.minutes": "минут",
+  "settings.interval.hours": "часов"
 }

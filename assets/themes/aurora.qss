@@ -1398,8 +1398,22 @@ QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
     border: 1px solid #7c3aed;
     background-color: #16162a;
 }
-QLineEdit::placeholder {
-    color: #3f4e5e;
+
+
+QSpinBox {
+    padding-right: 8px;
+}
+QSpinBox::up-button, QSpinBox::down-button {
+    width: 0px;
+    height: 0px;
+    border: none;
+    background: transparent;
+}
+QSpinBox::up-arrow, QSpinBox::down-arrow {
+    width: 0px;
+    height: 0px;
+    image: none;
+    border: none;
 }
 
 QComboBox::drop-down { border: none; width: 30px; }

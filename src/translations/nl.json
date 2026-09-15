@@ -120,7 +120,7 @@
   "settings.check_updates_running": "Controleren…",
   "settings.up_to_date": "U hebt de nieuwste versie.",
   "settings.update_check_failed": "Controle op updates mislukt: {msg}",
-  "settings.check_interval": "Controle-interval (seconden):",
+  "settings.check_interval": "Controle-interval:",
   "settings.auto_reconnect": "Automatisch verbinden bij starten",
   "settings.auto_remount": "Automatisch opnieuw verbinden bij verbindingsverlies",
   "settings.sshfs_disable_cache": "Mapcache uitschakelen (directe verversing)",
@@ -494,5 +494,13 @@
   "card.menu.copy": "Verbinding kopiëren (Ctrl+C)",
   "card.menu.paste": "Verbinding plakken (Ctrl+V)",
   "login.remember_password": "Wachtwoord onthouden",
-  "login.signing_in": "Aanmelden..."
+  "login.signing_in": "Aanmelden...",
+  "settings.section.appearance": "WEERGAVE",
+  "settings.theme.import": "Thema importeren (.qss)",
+  "settings.theme.open_folder": "Themamap openen",
+  "settings.theme.actions": "Thema-acties",
+  "settings.theme.import_title": "Thema importeren",
+  "settings.interval.seconds": "seconden",
+  "settings.interval.minutes": "minuten",
+  "settings.interval.hours": "uren"
 }

@@ -120,7 +120,7 @@
   "settings.check_updates_running": "Checking…",
   "settings.up_to_date": "You're up to date.",
   "settings.update_check_failed": "Update check failed: {msg}",
-  "settings.check_interval": "Check interval (seconds):",
+  "settings.check_interval": "Check interval:",
   "settings.auto_reconnect": "Auto-connect on start",
   "settings.auto_remount": "Auto-reconnect on connection loss",
   "settings.sshfs_disable_cache": "Disable directory cache (instant refresh)",
@@ -494,5 +494,13 @@
   "card.menu.copy": "Copy connection (Ctrl+C)",
   "card.menu.paste": "Paste connection (Ctrl+V)",
   "login.remember_password": "Remember password",
-  "login.signing_in": "Signing in..."
+  "login.signing_in": "Signing in...",
+  "settings.section.appearance": "APPEARANCE",
+  "settings.theme.import": "Import theme (.qss)",
+  "settings.theme.open_folder": "Open themes folder",
+  "settings.theme.actions": "Theme actions",
+  "settings.theme.import_title": "Import Theme",
+  "settings.interval.seconds": "seconds",
+  "settings.interval.minutes": "minutes",
+  "settings.interval.hours": "hours"
 }

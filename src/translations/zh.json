@@ -120,7 +120,7 @@
   "settings.check_updates_running": "正在检查…",
   "settings.up_to_date": "您已是最新版本。",
   "settings.update_check_failed": "检查更新失败：{msg}",
-  "settings.check_interval": "检查间隔（秒）：",
+  "settings.check_interval": "检查间隔：",
   "settings.auto_reconnect": "启动时自动连接",
   "settings.auto_remount": "连接断开时自动重连",
   "settings.sshfs_disable_cache": "禁用目录缓存（即时刷新）",
@@ -494,5 +494,13 @@
   "card.menu.copy": "复制连接 (Ctrl+C)",
   "card.menu.paste": "粘贴连接 (Ctrl+V)",
   "login.remember_password": "记住密码",
-  "login.signing_in": "登录中..."
+  "login.signing_in": "登录中...",
+  "settings.section.appearance": "外观",
+  "settings.theme.import": "导入主题 (.qss)",
+  "settings.theme.open_folder": "打开主题目录",
+  "settings.theme.actions": "主题操作",
+  "settings.theme.import_title": "导入主题",
+  "settings.interval.seconds": "秒",
+  "settings.interval.minutes": "分钟",
+  "settings.interval.hours": "小时"
 }
