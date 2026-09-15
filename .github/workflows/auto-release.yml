@@ -120,3 +120,7 @@ jobs:
           }
 
           Write-Host "All assets uploaded successfully."
+
+          # Ensure release is published (not draft)
+          Write-Host "Publishing release..."
+          gh release edit $tag --repo $env:GITHUB_REPOSITORY --draft=false
