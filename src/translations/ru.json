@@ -502,5 +502,17 @@
   "settings.theme.import_title": "Импорт темы",
   "settings.interval.seconds": "секунд",
   "settings.interval.minutes": "минут",
-  "settings.interval.hours": "часов"
+  "settings.interval.hours": "часов",
+  "settings.logo.label": "Значок приложения",
+  "settings.logo.choose": "Выбрать",
+  "settings.logo.reset": "Сбросить",
+  "settings.logo.saved": "Значок обновлён",
+  "settings.logo.reset_done": "Сброшено к значку по умолчанию",
+  "addedit.label.icon": "Значок",
+  "addedit.icon.default": "По умолчанию",
+  "addedit.icon.import": "Импорт SVG иконки",
+  "addedit.icon.import_title": "Выберите файл SVG иконки",
+  "login.loading": "Загрузка",
+  "action.pasting": "Вставка",
+  "action.deleting": "Удаление"
 }

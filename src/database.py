@@ -168,6 +168,7 @@ def init_db() -> None:
                 groups       TEXT DEFAULT '',    -- Kommaseparierte Gruppen/Tags
                 is_template  INTEGER NOT NULL DEFAULT 0,  -- 1 = Template, 0 = normale Verbindung
                 template_id  TEXT,               -- Referenz zu Template (falls von Template erstellt)
+                icon_name    TEXT DEFAULT '',    -- Per-connection custom icon (empty = default cloud)
                 created_at   TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
@@ -273,6 +274,8 @@ def init_db() -> None:
                 ("ftp_implicit_tls", "INTEGER NOT NULL DEFAULT 0"),
                 ("ftp_passive", "INTEGER NOT NULL DEFAULT 1"),
                 ("ftp_verify_cert", "INTEGER NOT NULL DEFAULT 1"),
+                # Per-connection custom icon
+                ("icon_name", "TEXT DEFAULT ''"),
             ]
             for column, ddl in migrations:
                 _add_column("connections", column, ddl, cols)

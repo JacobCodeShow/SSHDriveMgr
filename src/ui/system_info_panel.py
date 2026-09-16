@@ -177,15 +177,13 @@ class SSHSystemInfoThread(QThread):
             "last_seen": "who -b 2>/dev/null | awk '{print $3,$4}' | head -1",
             "cpu_model": "cat /proc/cpuinfo | grep 'model name' | head -1 | cut -d: -f2 | sed 's/^ //'",
             "cpu_cores": "nproc",
-            "cpu_percent": "top -bn1 | grep 'Cpu(s)' | awk '{print $2}' | sed 's/%us,//' 2>/dev/null || grep 'cpu ' /proc/stat | awk '{usage=($2+$4)*100/($2+$3+$4+$5)} END {printf \"%.1f\", usage}'",
+            "cpu_percent": "top -bn2 -d 0.5 | grep Cpu | tail -1 | sed 's/.*: *//' | awk '{print $1}' | tr -d '%us,'",
             "load": "cat /proc/loadavg | awk '{print $1}'",
-            "memory": "free -h | grep Mem",
-            "memory_percent": "free | grep Mem | awk '{printf \"%.1f\", $3/$2 * 100.0}'",
-            "disk": "df -h / | tail -1",
-            "disk_use_percent": "df / | tail -1 | awk '{print $5}' | sed 's/%//g'",
+            "meminfo": "grep -E 'MemTotal|MemAvailable' /proc/meminfo | awk '{print $2}' | paste -sd ' ' -",
+            "diskinfo": "df -P -B1 / | tail -1 | awk '{print $2, $3, $5}'",
             "processes": "ps aux | wc -l",
             "users": "who | wc -l",
-            "ip": "hostname -I 2>/dev/null | awk '{print $1}' || ip addr show | grep 'inet ' | grep -v '127.0.0.1' | head -1 | awk '{print $2}' | cut -d/ -f1",
+            "ip_unused": "true",  # IP field shows conn.host directly
             "temperature": "cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null | awk '{printf \"%.1f°C\", $1/1000}'",
         }
 
@@ -235,22 +233,20 @@ class SSHSystemInfoThread(QThread):
             if val:
                 info[current_key] = val
 
-        # Parse memory
-        if "memory" in info:
-            mem_parts = info["memory"].split()
-            if len(mem_parts) >= 3:
-                info["memory_total"] = mem_parts[1]
-                info["memory_used"] = mem_parts[2]
+        # Parse memory (meminfo: total_kb avail_kb)
+        if "meminfo" in info:
+            mem_parts = info["meminfo"].split()
+            if len(mem_parts) >= 2:
+                info["mem_total_kb"] = mem_parts[0]
+                info["mem_avail_kb"] = mem_parts[1]
 
-        # Parse disk
-        if "disk" in info:
-            disk_parts = info["disk"].split()
-            if len(disk_parts) >= 4:
-                info["disk_total"] = disk_parts[1]
-                info["disk_used"] = disk_parts[2]
-                info["disk_avail"] = disk_parts[3]
-                if len(disk_parts) >= 5:
-                    info["disk_use_percent"] = disk_parts[4].replace("%", "")
+        # Parse disk (diskinfo: total_bytes used_bytes pct%)
+        if "diskinfo" in info:
+            disk_parts = info["diskinfo"].split()
+            if len(disk_parts) >= 3:
+                info["disk_total_bytes"] = disk_parts[0]
+                info["disk_used_bytes"] = disk_parts[1]
+                info["disk_pct"] = disk_parts[2].replace("%", "")
 
         return info
 
@@ -748,25 +744,44 @@ class SystemInfoPanel(QFrame):
         self._cpu_bar.setValue(int(cpu_pct))
         self._set_bar_color(self._cpu_bar, cpu_pct)
 
-        # RAM
-        mem_used = info.get("memory_used", "—")
-        mem_total = info.get("memory_total", "—")
-        self._ram_row._value_lbl.setText(f"{mem_used} / {mem_total}")
+        # RAM — raw KB from /proc/meminfo; used = total - available
         try:
-            mem_pct = float(info.get("memory_percent", "0"))
+            mem_total_kb = float(info.get("mem_total_kb", "0"))
+            mem_avail_kb = float(info.get("mem_avail_kb", "0"))
+            if mem_total_kb > 0:
+                mem_used_kb = mem_total_kb - mem_avail_kb
+                mem_pct = mem_used_kb / mem_total_kb * 100.0
+                _gb = lambda kb: kb / 1024.0 / 1024.0
+                self._ram_row._value_lbl.setText(
+                    f"{_gb(mem_used_kb):.1f}G / {_gb(mem_total_kb):.1f}G  ({mem_pct:.0f}%)"
+                )
+            else:
+                self._ram_row._value_lbl.setText("— / —")
+                mem_pct = 0.0
         except Exception:
+            self._ram_row._value_lbl.setText("— / —")
             mem_pct = 0.0
         self._ram_bar.setValue(int(mem_pct))
         self._set_bar_color(self._ram_bar, mem_pct)
 
-        # Disk
-        disk_used = info.get("disk_used", "—")
-        disk_total = info.get("disk_total", "—")
+        # Disk — raw bytes from df -B1; format as GB (or TB if >= 1024G)
         try:
-            disk_pct = float(str(info.get("disk_use_percent", "0")).replace("%", ""))
+            disk_total_bytes = float(info.get("disk_total_bytes", "0"))
+            disk_used_bytes = float(info.get("disk_used_bytes", "0"))
+            disk_pct = float(str(info.get("disk_pct", "0")).replace("%", ""))
+            if disk_total_bytes > 0:
+                def _fmt_bytes(b):
+                    gb = b / (1024.0 ** 3)
+                    return f"{gb / 1024.0:.1f}T" if gb >= 1024.0 else f"{gb:.1f}G"
+                self._disk_row._value_lbl.setText(
+                    f"{_fmt_bytes(disk_used_bytes)} / {_fmt_bytes(disk_total_bytes)}  ({disk_pct:.0f}%)"
+                )
+            else:
+                self._disk_row._value_lbl.setText("— / —")
+                disk_pct = 0.0
         except Exception:
+            self._disk_row._value_lbl.setText("— / —")
             disk_pct = 0.0
-        self._disk_row._value_lbl.setText(f"{disk_used} / {disk_total}")
         self._disk_bar.setValue(int(disk_pct))
         self._set_bar_color(self._disk_bar, disk_pct)
 
@@ -798,9 +813,9 @@ class SystemInfoPanel(QFrame):
             pass
         self._proc_row._value_lbl.setText(procs)
 
-        # IP
-        ip = info.get("ip", "—")
-        self._ip_row._value_lbl.setText(ip)
+        # IP — show the configured connection address (consistent with the
+        # connection card); remote virtual/Docker interfaces are not useful here.
+        self._ip_row._value_lbl.setText(self._conn.host)
 
     def _on_error(self, msg: str, error_type: str = "generic"):
         self._set_loading_overlay_visible(False)

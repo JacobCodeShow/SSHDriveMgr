@@ -46,6 +46,7 @@ class Connection:
     key_path: str = ""
     putty_key_path: str = ""        # .ppk format key for PuTTY/plink
     drive_letter: str = "AUTO"
+    icon_name: str = ""  # per-connection icon name (empty = default cloud)
     protocol: str = PROTOCOL_SFTP   # "sftp" | "ftp" | "ftps"
     ftp_implicit_tls: bool = False  # ftps only: implicit TLS (990) statt AUTH TLS
     ftp_passive: bool = True        # FTP passive mode (Standard, firewall-freundlich)

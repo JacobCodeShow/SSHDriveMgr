@@ -369,11 +369,9 @@ def main():
     if not Session.is_logged_in():
         sys.exit(0)
 
-    # Reuse the full-screen dark overlay that login_dialog._on_auth_ok
-    # already showed BEFORE hiding itself. This guarantees zero blank-window
-    # gap between login-close and main-window-show. The overlay stays up
-    # until the main window has fully painted, then we close it below.
-    _boot_splash = getattr(login_dlg, "_boot_splash", None)
+    # Compact loading splash shown by login_dialog._on_auth_ok; closed below
+    # after the main window has painted.
+    _loading_splash = getattr(login_dlg, "_loading_splash", None)
 
     # Apply user's preferred language
     user_settings = None
@@ -453,9 +451,9 @@ def main():
         window.setPalette(_pal)
         window.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         window.showMaximized()
-        # Let the main window fully paint (2-3 frames), then drop the overlay.
-        if _boot_splash is not None:
-            QTimer.singleShot(300, _boot_splash.close)
+        # Drop the loading splash once the main window is on screen.
+        if _loading_splash is not None:
+            QTimer.singleShot(150, _loading_splash.close)
 
         # Start Update Check
         from src.updater import UpdaterManager

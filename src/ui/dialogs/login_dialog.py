@@ -62,6 +62,91 @@ class LoginWorker:
         self._thread.start()
 
 
+
+class LoadingSplash(QWidget):
+    """Centered loading splash shown between login success and main window paint.
+
+    A frameless rounded card with the app icon and an animated "Loading…" label.
+    Stays on top so the 1-frame native-HWND flash during MainWindow construction
+    is never visible. Closed by main.py after showMaximized().
+    """
+
+    def __init__(self, text_key: str = "login.loading"):
+        super().__init__()
+        self._text_key = text_key
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedSize(260, 170)
+
+        self._dots = 0
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(450)
+
+        self._build_ui()
+        self._center_on_screen()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 22, 20, 20)
+        layout.setSpacing(10)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        icon_lbl = QLabel()
+        icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_path = self._resource_path(os.path.join("assets", "app_icon.png"))
+        if os.path.exists(icon_path):
+            from PyQt6.QtGui import QPixmap
+            pm = QPixmap(icon_path).scaled(
+                52, 52,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            icon_lbl.setPixmap(pm)
+        layout.addWidget(icon_lbl)
+
+        self._text_lbl = QLabel(tr(self._text_key))
+        self._text_lbl.setObjectName("loadingText")
+        self._text_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._text_lbl.setStyleSheet("color: #c8cdd6; font-size: 14px;")
+        layout.addWidget(self._text_lbl)
+
+    def _tick(self):
+        self._dots = (self._dots + 1) % 4
+        self._text_lbl.setText(tr(self._text_key) + "." * self._dots)
+
+    def paintEvent(self, event):
+        from PyQt6.QtGui import QPainter, QColor, QBrush
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(QBrush(QColor(28, 30, 38, 245)))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(self.rect(), 16, 16)
+
+    def _center_on_screen(self):
+        screen = QApplication.primaryScreen()
+        if screen:
+            geo = screen.availableGeometry()
+            self.move(
+                geo.center().x() - self.width() // 2,
+                geo.center().y() - self.height() // 2
+            )
+
+    @staticmethod
+    def _resource_path(relative_path: str) -> str:
+        import sys
+        if hasattr(sys, "_MEIPASS"):
+            return os.path.join(sys._MEIPASS, relative_path)
+        return os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
+            relative_path
+        )
+
+
 class LoginDialog(FramelessDialog):
     """
     Shown at app start.
@@ -330,27 +415,12 @@ class LoginDialog(FramelessDialog):
                 AuthManager.clear_remembered_credentials()
         except Exception:
             pass  # Never block login on credential-storage failure
-        # Show a full-screen dark overlay BEFORE hiding the login dialog.
-        # This eliminates the blank-window gap between login-close and
-        # main-window-show where the main window's default-size left edge
-        # (the "small block") was visible. The overlay stays up until the
-        # main window has fully painted, then main.py closes it.
-        from PyQt6.QtWidgets import QWidget as _QWidget
-        from PyQt6.QtGui import QPalette as _QPalette, QColor as _QColor
-        self._boot_splash = _QWidget()
-        self._boot_splash.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
-        )
-        _sp = self._boot_splash.palette()
-        _sp.setColor(_QPalette.ColorRole.Window, _QColor("#0d0d12"))
-        self._boot_splash.setPalette(_sp)
-        self._boot_splash.setAutoFillBackground(True)
-        self._boot_splash.showFullScreen()
-        from PyQt6.QtWidgets import QApplication as _QApp
-        _QApp.processEvents()
-        # Now hide the login dialog (overlay is already up, no gap).
+        # Show a compact centered loading splash while the main window
+        # constructs. It stays on top so the 1-frame native-HWND flash
+        # during MainWindow() is hidden; main.py closes it after showMaximized().
+        self._loading_splash = LoadingSplash()
+        self._loading_splash.show()
+        QApplication.processEvents()
         self.move(-10000, -10000)
         self.hide()
         self.accept()

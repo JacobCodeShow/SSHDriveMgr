@@ -502,5 +502,17 @@
   "settings.theme.import_title": "Importar tema",
   "settings.interval.seconds": "segundos",
   "settings.interval.minutes": "minutos",
-  "settings.interval.hours": "horas"
+  "settings.interval.hours": "horas",
+  "settings.logo.label": "Icono de la app",
+  "settings.logo.choose": "Elegir",
+  "settings.logo.reset": "Restablecer",
+  "settings.logo.saved": "Icono actualizado",
+  "settings.logo.reset_done": "Restablecido al icono predeterminado",
+  "addedit.label.icon": "Icono",
+  "addedit.icon.default": "Predeterminado",
+  "addedit.icon.import": "Importar icono SVG",
+  "addedit.icon.import_title": "Seleccionar archivo de icono SVG",
+  "login.loading": "Cargando",
+  "action.pasting": "Pegando",
+  "action.deleting": "Eliminando"
 }

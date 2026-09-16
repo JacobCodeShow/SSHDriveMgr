@@ -39,6 +39,7 @@ from src.ui.debug_window import DebugWindow
 from src.app_logger import logger
 from src.ui.worker import MountWorker, UnmountWorker, TerminalConnectWorker
 from src.ui.dialogs.styled_message_box import StyledMessageBox
+from src.ui.dialogs.login_dialog import LoadingSplash
 from src.ui.frameless_dialog import FramelessDialog
 from src.ui.frameless_window import FramelessMainWindow
 from src.ui.icons import icon as svg_icon, pixmap as svg_pixmap
@@ -766,6 +767,8 @@ class MainWindow(FramelessMainWindow):
 
         self._list_container = QWidget()
         self._list_container.setObjectName("connectionList")
+        self._list_container.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._list_container.customContextMenuRequested.connect(self._on_list_context_menu)
         self._list_layout = QVBoxLayout(self._list_container)
         self._list_layout.setContentsMargins(12, 12, 12, 12)
         self._list_layout.setSpacing(10)
@@ -2405,6 +2408,30 @@ class MainWindow(FramelessMainWindow):
 
         # General
         v.addWidget(self._section_label(tr("addedit.section.general")))
+        # Connection icon selector (preset SVG icons)
+        from src.ui.icons import icon as svg_icon
+        self._ef_icon_name = conn.icon_name if is_edit else ""
+        icon_row = QFrame()
+        icon_row.setObjectName("rpInfoField")
+        icon_vl = QVBoxLayout(icon_row)
+        icon_vl.setContentsMargins(16, 8, 16, 8)
+        icon_vl.setSpacing(6)
+        icon_lbl = QLabel(tr("addedit.label.icon").upper())
+        icon_lbl.setObjectName("rpFieldLabelCaps")
+        icon_vl.addWidget(icon_lbl)
+        # Scrollable icon grid – presets + user-imported SVGs + add button.
+        # Shows ~2 rows by default; vertical scroll kicks in when more icons exist.
+        self._ef_icon_scroll = QScrollArea()
+        self._ef_icon_scroll.setWidgetResizable(True)
+        self._ef_icon_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._ef_icon_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._ef_icon_scroll.setMinimumHeight(92)
+        self._ef_icon_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        self._ef_icon_scroll.viewport().setAutoFillBackground(False)
+        self._ef_rebuild_icon_grid()
+        icon_vl.addWidget(self._ef_icon_scroll)
+        v.addWidget(icon_row)
+
         self._ef_name = QLineEdit(conn.name if is_edit else "")
         self._ef_name.setPlaceholderText(tr("addedit.placeholder.name"))
         v.addWidget(_ef_field(tr("addedit.label.name"), self._ef_name))
@@ -2994,37 +3021,58 @@ class MainWindow(FramelessMainWindow):
         if not self._clipboard_conn_id:
             self._set_status(tr("copy.status.nothing_to_paste"))
             return
-        src = self._mgr.get_by_id(self._clipboard_conn_id)
-        if not src:
-            self._clipboard_conn_id = None
-            self._set_status(tr("copy.status.source_gone"))
-            return
-        new_conn = self._mgr.duplicate(self._clipboard_conn_id)
-        if new_conn is None:
-            self._set_status(tr("copy.status.failed"))
-            return
+        # Show overlay to cover the card-creation + edit-panel open flicker.
+        _paste_splash = LoadingSplash("action.pasting")
+        _paste_splash.show()
+        from PyQt6.QtWidgets import QApplication as _QApp
+        _QApp.processEvents()
+        try:
+            self._paste_connection_inner(_paste_splash)
+        except Exception:
+            _paste_splash.close()
+            raise
 
-        # Append only the new card — do NOT rebuild the whole list (causes flicker)
-        mounted_map = self._controller.get_mounted_drives()
-        mounted = (not new_conn.is_ftp) and new_conn.drive_letter.upper().rstrip("\\") in {
-            k.upper().rstrip("\\") for k in mounted_map.keys()
-        }
-        container = self._create_connection_container(new_conn, mounted)
-        # Insert before the trailing stretch item (last item in the layout)
-        self._list_layout.insertWidget(self._list_layout.count() - 1, container)
-        self._containers[new_conn.id] = container
-        self._cards[new_conn.id] = container._card
+    def _paste_connection_inner(self, splash):
+        """Actual paste logic — called with the loading overlay already up."""
+        try:
+            if not self._clipboard_conn_id:
+                self._set_status(tr("copy.status.nothing_to_paste"))
+                return
+            src = self._mgr.get_by_id(self._clipboard_conn_id)
+            if not src:
+                self._clipboard_conn_id = None
+                self._set_status(tr("copy.status.source_gone"))
+                return
+            new_conn = self._mgr.duplicate(self._clipboard_conn_id)
+            if new_conn is None:
+                self._set_status(tr("copy.status.failed"))
+                return
 
-        # Refresh derived state without rebuilding cards
-        self._update_status()
-        self._tray.update_connections_menu(self._mgr.get_connections(), set(mounted_map.keys()))
-        self._refresh_groups_combo()
-        self._apply_group_filter()
+            # Append only the new card — do NOT rebuild the whole list (causes flicker)
+            mounted_map = self._controller.get_mounted_drives()
+            mounted = (not new_conn.is_ftp) and new_conn.drive_letter.upper().rstrip("\\") in {
+                k.upper().rstrip("\\") for k in mounted_map.keys()
+            }
+            container = self._create_connection_container(new_conn, mounted)
+            # Insert before the trailing stretch item (last item in the layout)
+            self._list_layout.insertWidget(self._list_layout.count() - 1, container)
+            self._containers[new_conn.id] = container
+            self._cards[new_conn.id] = container._card
 
-        self._set_status(tr("copy.status.pasted", src=src.name, dst=new_conn.name))
-        # Defer panel open so the new card finishes laying out first
-        new_id = new_conn.id
-        QTimer.singleShot(0, lambda: self._open_edit_panel(new_id))
+            # Refresh derived state without rebuilding cards
+            self._update_status()
+            self._tray.update_connections_menu(self._mgr.get_connections(), set(mounted_map.keys()))
+            self._refresh_groups_combo()
+            self._apply_group_filter()
+
+            self._set_status(tr("copy.status.pasted", src=src.name, dst=new_conn.name))
+            # Defer panel open so the new card finishes laying out first
+            new_id = new_conn.id
+            QTimer.singleShot(0, lambda: self._open_edit_panel(new_id))
+        finally:
+            # Always close the overlay — 350ms covers the panel-open transition
+            # on success, and is a brief confirmation on early-return paths.
+            QTimer.singleShot(350, splash.close)
 
     # ------------------------------------------------------------------
     # Settings form
@@ -3173,6 +3221,9 @@ class MainWindow(FramelessMainWindow):
         app_vl.addWidget(_inner_sep())
         app_vl.addWidget(_row_combo(tr("settings.language.label"), self._sf_lang))
         app_vl.addWidget(_hint_row(tr("settings.language.restart")))
+        app_vl.addWidget(_inner_sep())
+
+
         v.addWidget(app_card)
         v.addSpacing(14)
 
@@ -4074,6 +4125,117 @@ class MainWindow(FramelessMainWindow):
                                if cli_enabled else None),
         }
 
+
+    def _ef_select_icon(self, name: str):
+        """Select an icon for this connection."""
+        self._ef_icon_name = name
+        for btn_name, btn in self._ef_icon_btns.items():
+            btn.setChecked(btn_name == name)
+
+    def _ef_get_icon_names(self):
+        """Return all available icon names: built-in presets + user-imported SVGs."""
+        presets = ["", "cloud", "server", "terminal", "database", "globe",
+                   "laptop", "monitor", "router", "shield", "lock",
+                   "code", "git-branch", "box", "folder", "key", "users", "cpu"]
+        custom = []
+        try:
+            from src.config import get_config_dir
+            custom_dir = get_config_dir() / "custom_icons"
+            if custom_dir.exists():
+                for f in sorted(custom_dir.glob("*.svg")):
+                    custom.append(f"custom:{f.stem}")
+        except Exception:
+            pass
+        return presets + custom
+
+    def _ef_rebuild_icon_grid(self):
+        """Rebuild the icon selector grid. Called on form init and after importing a new icon."""
+        from src.ui.icons import icon as svg_icon
+
+        old_widget = self._ef_icon_scroll.widget()
+        if old_widget is not None:
+            old_widget.deleteLater()
+
+        icon_grid = QWidget()
+        icon_grid.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        grid = QGridLayout(icon_grid)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(4)
+        self._ef_icon_btns = {}
+
+        icon_names = self._ef_get_icon_names()
+        for idx, name in enumerate(icon_names):
+            btn = QPushButton()
+            btn.setFixedSize(36, 36)
+            btn.setCheckable(True)
+            btn.setChecked(self._ef_icon_name == name)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            if name:
+                btn.setIcon(svg_icon(name, "#aab4c4", 22))
+                display = name[7:] if name.startswith("custom:") else name
+                btn.setToolTip(display)
+            else:
+                btn.setIcon(svg_icon("cloud", "#aab4c4", 22))
+                btn.setToolTip(tr("addedit.icon.default"))
+            btn.clicked.connect(lambda checked, n=name: self._ef_select_icon(n))
+            self._ef_icon_btns[name] = btn
+            row, col = divmod(idx, 9)
+            grid.addWidget(btn, row, col)
+
+        # Dashed-border square button with centered SVG plus for importing icons
+        add_btn = QPushButton()
+        add_btn.setFixedSize(36, 36)
+        add_btn.setIconSize(QSize(20, 20))
+        add_btn.setIcon(svg_icon("plus", "#aab4c4", 20))
+        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_btn.setToolTip(tr("addedit.icon.import"))
+        add_btn.setStyleSheet("""
+            QPushButton {
+                border: 2px dashed #aab4c4;
+                border-radius: 8px;
+                background: transparent;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                border-color: #00b4d8;
+            }
+        """)
+        add_btn.clicked.connect(self._ef_import_custom_icon)
+        row, col = divmod(len(icon_names), 9)
+        grid.addWidget(add_btn, row, col)
+
+        self._ef_icon_scroll.setWidget(icon_grid)
+
+    def _ef_import_custom_icon(self):
+        """Open file picker to import a user SVG icon into config_dir/custom_icons/."""
+        import os as _os
+        import shutil as _shutil
+        from src.config import get_config_dir
+        from PyQt6.QtWidgets import QFileDialog
+
+        custom_dir = get_config_dir() / "custom_icons"
+        custom_dir.mkdir(parents=True, exist_ok=True)
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            tr("addedit.icon.import_title"),
+            "",
+            "SVG Files (*.svg);;All Files (*)"
+        )
+        if not file_path:
+            return
+
+        dest = custom_dir / _os.path.basename(file_path)
+        try:
+            _shutil.copy2(file_path, str(dest))
+        except Exception as e:
+            self._show_inline_message(tr("dialog.error"), str(e), is_error=True)
+            return
+
+        # Auto-select the newly imported icon and refresh the grid
+        self._ef_icon_name = f"custom:{dest.stem}"
+        self._ef_rebuild_icon_grid()
+
     def _save_edit_form(self):
         if not getattr(self, "_ef_conn", None):
             self._show_inline_message(tr("dialog.error"), "Formular ist nicht verfügbar. Bitte erneut öffnen.", is_error=True)
@@ -4109,6 +4271,7 @@ class MainWindow(FramelessMainWindow):
             password=self._safe_lineedit_text("_ef_pw"),
             groups=self._safe_lineedit_text("_ef_groups"),
             is_template=is_template,
+            icon_name=getattr(self, "_ef_icon_name", ""),
             **self._ef_collect_protocol_fields(),
         )
         self._mgr.update(updated)
@@ -4152,6 +4315,7 @@ class MainWindow(FramelessMainWindow):
             password="" if is_tpl else self._safe_lineedit_text("_ef_pw"),
             groups=self._safe_lineedit_text("_ef_groups"),
             is_template=is_tpl,
+            icon_name=getattr(self, "_ef_icon_name", ""),
             **fields,
         )
         self._mgr.add(new_conn)
@@ -4159,6 +4323,7 @@ class MainWindow(FramelessMainWindow):
         self._set_status(tr("status.saved"))
         self._ef_initial_snapshot = self._snapshot_form()
         self._open_info_panel(new_conn.id)
+
 
     def _save_settings_form(self, navigate_home: bool = True) -> bool:
         if self._sf_term_putty.isChecked():
@@ -4460,10 +4625,18 @@ class MainWindow(FramelessMainWindow):
                 yes_text=tr("main.delete"), no_text=tr("dialog.cancel")
             ):
                 return
-        self._mgr.delete(conn_id)
-        self._close_right_panel_force()
-        self._refresh_list()
-        self._set_status(tr("status.connection_deleted", name=conn.name))
+        # Show overlay to cover the list-rebuild flicker.
+        _del_splash = LoadingSplash("action.deleting")
+        _del_splash.show()
+        from PyQt6.QtWidgets import QApplication as _QApp
+        _QApp.processEvents()
+        try:
+            self._mgr.delete(conn_id)
+            self._close_right_panel_force()
+            self._refresh_list()
+            self._set_status(tr("status.connection_deleted", name=conn.name))
+        finally:
+            QTimer.singleShot(300, _del_splash.close)
 
     def _prepare_auth(self, conn):
         import copy
@@ -4846,6 +5019,26 @@ class MainWindow(FramelessMainWindow):
             card.update_connection(conn)
         self._set_status("Drive set to %s for '%s'" % (drive, conn.name))
 
+    def _on_list_context_menu(self, pos):
+        """Right-click menu for the blank area below connection cards."""
+        menu = QMenu(self)
+        act_new = menu.addAction(tr("main.add_connection"))
+        act_paste = menu.addAction(tr("card.menu.paste"))
+        act_paste.setEnabled(self._clipboard_conn_id is not None)
+        menu.addSeparator()
+        act_refresh = menu.addAction(tr("sysinfo.refresh"))
+
+        global_pos = self._list_container.mapToGlobal(pos)
+        chosen = menu.exec(global_pos)
+        if chosen is None:
+            return
+        if chosen == act_new:
+            self._open_add_panel()
+        elif chosen == act_paste:
+            self._paste_connection()
+        elif chosen == act_refresh:
+            self._refresh_list()
+
     @pyqtSlot(str, object)
     def _on_card_context_menu(self, conn_id: str, global_pos):
         conn = self._mgr.get_by_id(conn_id)
@@ -4862,7 +5055,6 @@ class MainWindow(FramelessMainWindow):
         act_mount = None
         act_explorer = None
         act_explorer_ftp = None
-        act_connect_ssh = None
         act_ssh_openssh = act_ssh_putty = act_ssh_xterm = None
 
         if is_ftp:
@@ -4885,8 +5077,7 @@ class MainWindow(FramelessMainWindow):
             act_sftp = menu.addAction(tr("card.menu.sftp_browser"))
             menu.addSeparator()
 
-            act_connect_ssh = menu.addAction(tr("card.menu.connect_ssh"))
-            ssh_menu = menu.addMenu(tr("card.menu.ssh_open_with"))
+            ssh_menu = menu.addMenu(tr("card.menu.connect_ssh"))
             act_ssh_openssh = ssh_menu.addAction(tr("card.menu.ssh_openssh"))
             act_ssh_putty = ssh_menu.addAction(tr("card.menu.ssh_putty"))
             act_ssh_xterm = ssh_menu.addAction(tr("card.menu.ssh_xterm"))
@@ -4915,8 +5106,6 @@ class MainWindow(FramelessMainWindow):
             self._on_open_explorer(conn_id)
         elif chosen == act_sftp:
             self._open_sftp_browser(conn_id, mounted_only=False)
-        elif act_connect_ssh is not None and chosen == act_connect_ssh:
-            self._on_ssh_requested(conn_id)
         elif act_ssh_openssh is not None and chosen == act_ssh_openssh:
             self._on_ssh_terminal_with_backend(conn_id, "ssh")
         elif act_ssh_putty is not None and chosen == act_ssh_putty:
@@ -5015,7 +5204,7 @@ class MainWindow(FramelessMainWindow):
         user = Session.current()
         if not user:
             return
-        from src.ui.dialogs.login_dialog import ChangePasswordDialog
+        from src.ui.dialogs.login_dialog import ChangePasswordDialog, LoadingSplash
         ChangePasswordDialog(user.id, self).exec()
 
     def _on_logout(self):

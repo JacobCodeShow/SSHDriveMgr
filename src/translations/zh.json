@@ -502,5 +502,17 @@
   "settings.theme.import_title": "导入主题",
   "settings.interval.seconds": "秒",
   "settings.interval.minutes": "分钟",
-  "settings.interval.hours": "小时"
+  "settings.interval.hours": "小时",
+  "settings.logo.label": "应用图标",
+  "settings.logo.choose": "选择",
+  "settings.logo.reset": "恢复默认",
+  "settings.logo.saved": "图标已更新",
+  "settings.logo.reset_done": "已恢复默认图标",
+  "addedit.label.icon": "图标",
+  "addedit.icon.default": "默认",
+  "addedit.icon.import": "导入 SVG 图标",
+  "addedit.icon.import_title": "选择 SVG 图标文件",
+  "login.loading": "正在加载",
+  "action.pasting": "粘贴中",
+  "action.deleting": "删除中"
 }

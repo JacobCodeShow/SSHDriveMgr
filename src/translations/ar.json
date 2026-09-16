@@ -502,5 +502,17 @@
   "settings.theme.import_title": "استيراد سمة",
   "settings.interval.seconds": "ثواني",
   "settings.interval.minutes": "دقائق",
-  "settings.interval.hours": "ساعات"
+  "settings.interval.hours": "ساعات",
+  "settings.logo.label": "أيقونة التطبيق",
+  "settings.logo.choose": "اختيار",
+  "settings.logo.reset": "إعادة تعيين",
+  "settings.logo.saved": "تم تحديث الأيقونة",
+  "settings.logo.reset_done": "تمت إعادة التعيين إلى الأيقونة الافتراضية",
+  "addedit.label.icon": "الأيقونة",
+  "addedit.icon.default": "افتراضي",
+  "addedit.icon.import": "استيراد أيقونة SVG",
+  "addedit.icon.import_title": "حدد ملف أيقونة SVG",
+  "login.loading": "جارٍ التحميل",
+  "action.pasting": "الصق",
+  "action.deleting": "حذف"
 }

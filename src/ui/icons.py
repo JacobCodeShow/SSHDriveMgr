@@ -9,6 +9,7 @@ diese Funktion ersetzt das beim Laden durch die gewünschte Farbe.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from functools import lru_cache
 
@@ -28,6 +29,19 @@ def _icons_root() -> str:
 
 @lru_cache(maxsize=256)
 def _svg_bytes(name: str, color: str) -> bytes:
+    if name.startswith("custom:"):
+        # User-imported SVG from config_dir/custom_icons/
+        from src.config import get_config_dir
+        custom_dir = get_config_dir() / "custom_icons"
+        path = custom_dir / f"{name[7:]}.svg"
+        with open(path, "r", encoding="utf-8") as f:
+            svg = f.read()
+        svg = svg.replace("currentColor", color)
+        # User SVGs often use hardcoded black; recolor them to match theme
+        svg = re.sub(r'fill="(black|#000000|#000|#111|#222|#333)"', f'fill="{color}"', svg)
+        svg = re.sub(r'stroke="(black|#000000|#000|#111|#222|#333)"', f'stroke="{color}"', svg)
+        return svg.encode("utf-8")
+
     path = os.path.join(_icons_root(), f"{name}.svg")
     with open(path, "r", encoding="utf-8") as f:
         svg = f.read()

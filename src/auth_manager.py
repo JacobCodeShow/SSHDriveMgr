@@ -783,6 +783,10 @@ class UserConnectionManager:
             template_id = row["template_id"] or None
         except (KeyError, IndexError):
             template_id = None
+        try:
+            icon_name = row["icon_name"] or ""
+        except (KeyError, IndexError):
+            icon_name = ""
 
         # FTP-Felder: Datenbanken vor der FTP-Unterstützung kennen sie nicht
         try:
@@ -823,6 +827,7 @@ class UserConnectionManager:
             groups=groups,
             is_template=is_template,
             template_id=template_id,
+            icon_name=icon_name,
         )
 
     def get_all(self, include_templates: bool = False) -> List[Connection]:
@@ -914,8 +919,8 @@ class UserConnectionManager:
                     sort_order, cli_access_enabled, cli_access_key, cli_access_key_iv, cli_access_key_hash,
                     name_enc, name_iv, host_enc, host_iv,
                     ssh_user_enc, ssh_user_iv, remote_path_enc, remote_path_iv,
-                    groups, is_template, template_id)
-                   VALUES (?, ?, '', '', '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    groups, is_template, template_id, icon_name)
+                   VALUES (?, ?, '', '', '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     c.id, self._user.id, c.port, c.auth_method,
                     pw_enc, pw_iv, c.key_path, c.putty_key_path, c.drive_letter,
@@ -924,7 +929,7 @@ class UserConnectionManager:
                     c.sort_order, int(c.cli_access_enabled), cli_key_enc, cli_key_iv, cli_key_hash,
                     name_enc, name_iv, host_enc, host_iv,
                     user_enc, user_iv, path_enc, path_iv,
-                    c.groups, int(c.is_template), c.template_id,
+                    c.groups, int(c.is_template), c.template_id, c.icon_name,
                 )
             )
         return c
@@ -948,7 +953,7 @@ class UserConnectionManager:
                    cli_access_enabled=?, cli_access_key=?, cli_access_key_iv=?, cli_access_key_hash=?,
                    name_enc=?, name_iv=?, host_enc=?, host_iv=?,
                    ssh_user_enc=?, ssh_user_iv=?, remote_path_enc=?, remote_path_iv=?,
-                   groups=?, is_template=?, template_id=?
+                   groups=?, is_template=?, template_id=?, icon_name=?
                    WHERE id=? AND user_id=?""",
                 (c.port, c.auth_method, pw_enc, pw_iv,
                  c.key_path, c.putty_key_path, c.drive_letter,
@@ -957,7 +962,7 @@ class UserConnectionManager:
                  int(c.cli_access_enabled), cli_key_enc, cli_key_iv, cli_key_hash,
                  name_enc, name_iv, host_enc, host_iv,
                  user_enc, user_iv, path_enc, path_iv,
-                 c.groups, int(c.is_template), c.template_id,
+                 c.groups, int(c.is_template), c.template_id, c.icon_name,
                  c.id, self._user.id)
             )
         return result.rowcount > 0

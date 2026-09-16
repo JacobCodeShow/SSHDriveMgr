@@ -151,8 +151,14 @@ class ConnectionCard(QFrame):
         self._drive_badge.setProperty("mounted", mounted)
         self._mount_btn.setProperty("mounted", mounted)
 
-        cloud_color = "#00b4d8" if mounted else "#6a7a8a"
-        self._cloud_lbl.setPixmap(svg_pixmap("cloud", cloud_color, 32))
+        # Prefer per-connection custom icon, else default cloud
+        icon_name = getattr(self._conn, "icon_name", "")
+        if icon_name:
+            icon_color = "#00b4d8" if mounted else "#aab4c4"
+            self._cloud_lbl.setPixmap(svg_pixmap(icon_name, icon_color, 32))
+        else:
+            cloud_color = "#00b4d8" if mounted else "#6a7a8a"
+            self._cloud_lbl.setPixmap(svg_pixmap("cloud", cloud_color, 32))
 
         if mounted:
             self._cloud_lbl.setToolTip(tr("card.tooltip.open_path"))
@@ -205,7 +211,12 @@ class ConnectionCard(QFrame):
         """Card state for FTP/FTPS: no mount toggle, the button opens the browser."""
         self._mounted = False
         self.setProperty("mounted", False)
-        self._cloud_lbl.setPixmap(svg_pixmap("cloud", "#6a7a8a", 32))
+        # Prefer per-connection custom icon, else default cloud
+        icon_name = getattr(self._conn, "icon_name", "")
+        if icon_name:
+            self._cloud_lbl.setPixmap(svg_pixmap(icon_name, "#aab4c4", 32))
+        else:
+            self._cloud_lbl.setPixmap(svg_pixmap("cloud", "#6a7a8a", 32))
         self._cloud_lbl.setToolTip(self._browser_tooltip())
         self._drive_badge.setToolTip(self._browser_tooltip())
         self._drive_badge.setCursor(Qt.CursorShape.PointingHandCursor)

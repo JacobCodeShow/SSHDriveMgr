@@ -502,5 +502,17 @@
   "settings.theme.import_title": "Thema importeren",
   "settings.interval.seconds": "seconden",
   "settings.interval.minutes": "minuten",
-  "settings.interval.hours": "uren"
+  "settings.interval.hours": "uren",
+  "settings.logo.label": "App-pictogram",
+  "settings.logo.choose": "Kiezen",
+  "settings.logo.reset": "Resetten",
+  "settings.logo.saved": "Pictogram bijgewerkt",
+  "settings.logo.reset_done": "Teruggezet naar standaardpictogram",
+  "addedit.label.icon": "Pictogram",
+  "addedit.icon.default": "Standaard",
+  "addedit.icon.import": "SVG-pictogram importeren",
+  "addedit.icon.import_title": "SVG-pictogrambestand selecteren",
+  "login.loading": "Laden",
+  "action.pasting": "Plakken",
+  "action.deleting": "Verwijderen"
 }
