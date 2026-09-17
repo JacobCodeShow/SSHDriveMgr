@@ -534,10 +534,14 @@ class SettingsDialog(QDialog):
 
     @staticmethod
     def _create_desktop_shortcut() -> tuple[bool, str]:
-        import os
-        import sys
-        import subprocess
+        """Create a desktop shortcut using native IShellLinkW (Unicode, no encoding issues)."""
+        try:
+            import pythoncom
+            from win32com.shell import shell, shellcon
+        except ImportError as e:
+            return False, f"pywin32 not available: {e}"
 
+        # Target: packaged EXE or python + main.py
         if getattr(sys, "frozen", False):
             target_path = os.path.abspath(sys.executable)
             args = ""
@@ -547,34 +551,49 @@ class SettingsDialog(QDialog):
             main_script = os.path.join(project_root, "main.py")
             args = f'"{main_script}"'
 
-        desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+        # Real desktop path (handles OneDrive redirect / custom locations)
+        try:
+            desktop = shell.SHGetKnownFolderPath(shellcon.FOLDERID_Desktop, 0, 0)
+        except Exception:
+            desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+
         shortcut_path = os.path.join(desktop, "SSH 磁盘管理器.lnk")
 
-        ps_script = (
-            "$WshShell = New-Object -ComObject WScript.Shell\n"
-            f"$Shortcut = $WshShell.CreateShortcut('{shortcut_path}')\n"
-            f"$Shortcut.TargetPath = '{target_path}'\n"
-            f"$Shortcut.WorkingDirectory = '{os.path.dirname(target_path)}'\n"
-            "$Shortcut.Description = 'SSH 磁盘管理器'\n"
-            f"$Shortcut.IconLocation = '{target_path},0'\n"
-            + (f"$Shortcut.Arguments = '{args}'\n" if args else "")
-            + "$Shortcut.Save()"
-        )
-
         try:
-            cp = subprocess.run(
-                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
-                check=True,
-                capture_output=True,
-                text=True,
+            pythoncom.CoInitialize()
+            sl = pythoncom.CoCreateInstance(
+                shell.CLSID_ShellLink,
+                None,
+                pythoncom.CLSCTX_INPROC_SERVER,
+                shell.IID_IShellLink,
             )
+            sl.SetPath(target_path)
+            sl.SetWorkingDirectory(os.path.dirname(target_path))
+            sl.SetDescription("SSH 磁盘管理器")
+            sl.SetIconLocation(target_path, 0)
+            if args:
+                sl.SetArguments(args)
+
+            pf = sl.QueryInterface(pythoncom.IID_IPersistFile)
+            pf.Save(shortcut_path, 0)
+
+            try:
+                shell.SHChangeNotify(
+                    shellcon.SHCNE_CREATE | shellcon.SHCNE_UPDATEITEM,
+                    shellcon.SHCNF_PATH,
+                    shortcut_path,
+                    None,
+                )
+            except Exception:
+                pass
+
             if not os.path.exists(shortcut_path):
                 return False, "Shortcut file was not created"
-            return True, cp.stdout.strip()
-        except subprocess.CalledProcessError as e:
-            return False, (e.stderr or e.stdout or str(e)).strip()
+            return True, shortcut_path
         except Exception as e:
             return False, str(e)
+        finally:
+            pythoncom.CoUninitialize()
 
     def _on_check_updates(self):
         self._update_btn.setText("Prüfe... ⏳")

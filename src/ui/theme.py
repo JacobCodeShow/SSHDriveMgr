@@ -1473,6 +1473,19 @@ QComboBox QAbstractItemView::item:selected {
 #statusText {
     color: #8fa4b8;
 }
+#statusCloseBtn {
+    background: transparent;
+    border: none;
+    color: #607489;
+    font-size: 13px;
+    font-weight: bold;
+    border-radius: 4px;
+    padding: 0;
+}
+#statusCloseBtn:hover {
+    background: rgba(255,255,255,0.08);
+    color: #c8d0e0;
+}
 #statusPill {
     color: #607489;
 }
@@ -2911,6 +2924,19 @@ QComboBox QAbstractItemView::item:selected {
 #statusDot { color: #007a3d; font-size: 9px; margin-right: 4px; }
 #statusText {
     color: #617386;
+}
+#statusCloseBtn {
+    background: transparent;
+    border: none;
+    color: #8a9aab;
+    font-size: 13px;
+    font-weight: bold;
+    border-radius: 4px;
+    padding: 0;
+}
+#statusCloseBtn:hover {
+    background: rgba(0,0,0,0.06);
+    color: #2c3e50;
 }
 #statusPill {
     background-color: #ffffff;

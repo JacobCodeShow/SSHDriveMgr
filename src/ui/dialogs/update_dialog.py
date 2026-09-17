@@ -254,7 +254,8 @@ def run_pending_update_dialog(parent, updater) -> bool:
         return False
 
     dlg = UpdateDialog(parent, str(record.get("version", "")),
-                       str(record.get("changelog", "")), "", "installer",
+                       str(record.get("changelog", "")), "",
+                       str(record.get("asset_type", "installer")),
                        already_downloaded=True,
                        armed=bool(record.get("install_on_next_start")))
     _wire(dlg, updater)

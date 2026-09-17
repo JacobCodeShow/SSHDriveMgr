@@ -1043,6 +1043,20 @@ class MainWindow(FramelessMainWindow):
         self._status_lbl.setObjectName("statusText")
         h.addWidget(self._status_lbl)
 
+        self._status_close_btn = QPushButton("✕")
+        self._status_close_btn.setObjectName("statusCloseBtn")
+        self._status_close_btn.setFixedSize(22, 22)
+        self._status_close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._status_close_btn.setToolTip("清除")
+        self._status_close_btn.clicked.connect(self._clear_status)
+        self._status_close_btn.hide()
+        h.addWidget(self._status_close_btn)
+
+        # Auto-clear timer for transient status messages
+        self._status_timer = QTimer(self)
+        self._status_timer.setSingleShot(True)
+        self._status_timer.timeout.connect(self._clear_status)
+
         h.addStretch()
 
         self._mount_count_lbl = QLabel("")
@@ -3697,9 +3711,14 @@ class MainWindow(FramelessMainWindow):
 
     @staticmethod
     def _create_desktop_shortcut() -> tuple[bool, str]:
-        import subprocess
+        """Create a desktop shortcut using native IShellLinkW (Unicode, no encoding issues)."""
+        try:
+            import pythoncom
+            from win32com.shell import shell, shellcon
+        except ImportError as e:
+            return False, f"pywin32 not available: {e}"
 
-        # In packaged mode this is the app EXE path.
+        # Target: packaged EXE or python + main.py
         if getattr(sys, "frozen", False):
             target_path = os.path.abspath(sys.executable)
             args = ""
@@ -3709,34 +3728,49 @@ class MainWindow(FramelessMainWindow):
             main_script = os.path.join(project_root, "main.py")
             args = f'"{main_script}"'
 
-        desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+        # Real desktop path (handles OneDrive redirect / custom locations)
+        try:
+            desktop = shell.SHGetKnownFolderPath(shellcon.FOLDERID_Desktop, 0, 0)
+        except Exception:
+            desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+
         shortcut_path = os.path.join(desktop, "SSH 磁盘管理器.lnk")
 
-        ps_script = (
-            "$WshShell = New-Object -ComObject WScript.Shell\n"
-            f"$Shortcut = $WshShell.CreateShortcut('{shortcut_path}')\n"
-            f"$Shortcut.TargetPath = '{target_path}'\n"
-            f"$Shortcut.WorkingDirectory = '{os.path.dirname(target_path)}'\n"
-            "$Shortcut.Description = 'SSH 磁盘管理器'\n"
-            f"$Shortcut.IconLocation = '{target_path},0'\n"
-            + (f"$Shortcut.Arguments = '{args}'\n" if args else "")
-            + "$Shortcut.Save()"
-        )
-
         try:
-            cp = subprocess.run(
-                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
-                check=True,
-                capture_output=True,
-                text=True,
+            pythoncom.CoInitialize()
+            sl = pythoncom.CoCreateInstance(
+                shell.CLSID_ShellLink,
+                None,
+                pythoncom.CLSCTX_INPROC_SERVER,
+                shell.IID_IShellLink,
             )
+            sl.SetPath(target_path)
+            sl.SetWorkingDirectory(os.path.dirname(target_path))
+            sl.SetDescription("SSH 磁盘管理器")
+            sl.SetIconLocation(target_path, 0)
+            if args:
+                sl.SetArguments(args)
+
+            pf = sl.QueryInterface(pythoncom.IID_IPersistFile)
+            pf.Save(shortcut_path, 0)
+
+            try:
+                shell.SHChangeNotify(
+                    shellcon.SHCNE_CREATE | shellcon.SHCNE_UPDATEITEM,
+                    shellcon.SHCNF_PATH,
+                    shortcut_path,
+                    None,
+                )
+            except Exception:
+                pass
+
             if not os.path.exists(shortcut_path):
                 return False, "Shortcut file was not created"
-            return True, cp.stdout.strip()
-        except subprocess.CalledProcessError as e:
-            return False, (e.stderr or e.stdout or str(e)).strip()
+            return True, shortcut_path
         except Exception as e:
             return False, str(e)
+        finally:
+            pythoncom.CoUninitialize()
 
     # ------------------------------------------------------------------
     # Right panel save / cancel
@@ -5278,6 +5312,19 @@ class MainWindow(FramelessMainWindow):
 
     def _set_status(self, msg: str):
         self._status_lbl.setText(msg)
+        if hasattr(self, "_status_close_btn"):
+            self._status_close_btn.show()
+        if hasattr(self, "_status_timer"):
+            self._status_timer.start(8000)
+
+    def _clear_status(self):
+        """Dismiss the current status message, revert to ready."""
+        if hasattr(self, "_status_lbl"):
+            self._status_lbl.setText(tr("app.ready"))
+        if hasattr(self, "_status_close_btn"):
+            self._status_close_btn.hide()
+        if hasattr(self, "_status_timer"):
+            self._status_timer.stop()
 
     @pyqtSlot(str)
     def _on_log_record_for_status(self, line: str):

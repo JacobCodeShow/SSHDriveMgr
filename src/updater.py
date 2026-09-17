@@ -42,6 +42,16 @@ _MARKER_NAME = "pending_update.json"
 _ATTEMPT_NAME = "update_attempt.json"
 
 
+def is_installed_copy() -> bool:
+    """True if the running EXE lives under Program Files (Setup-installed copy)."""
+    if not getattr(sys, "frozen", False):
+        return False
+    exe = os.path.abspath(sys.executable).lower()
+    pf = os.environ.get("ProgramFiles", "").lower()
+    pf86 = os.environ.get("ProgramFiles(x86)", "").lower()
+    return (pf and exe.startswith(pf)) or (pf86 and exe.startswith(pf86))
+
+
 # ── Pending-update bookkeeping ──────────────────────────────────────────────
 
 def updates_dir() -> Path:
@@ -92,12 +102,14 @@ def get_pending_update(current_version: str) -> dict | None:
 
 
 def save_pending_update(version_str: str, installer_path: str, asset_name: str,
-                        changelog: str = "", install_on_next_start: bool = True) -> None:
-    """Remember a downloaded installer so later starts/checks can find it."""
+                        changelog: str = "", install_on_next_start: bool = True,
+                        asset_type: str = "installer") -> None:
+    """Remember a downloaded update file so later starts/checks can find it."""
     record = {
         "version": version_str,
         "installer_path": str(installer_path),
         "asset_name": asset_name,
+        "asset_type": asset_type,
         # Kept so the dialog can show release notes without asking GitHub again.
         "changelog": changelog,
         "install_on_next_start": bool(install_on_next_start),
@@ -204,27 +216,32 @@ def _is_safe_script_path(path: str) -> bool:
 
 def launch_pending_installer(record: dict, from_version: str = "") -> bool:
     """
-    Start a detached helper script that waits for this process to exit, runs
-    the installer, and relaunches the app afterwards (also when the installer
-    was cancelled). The caller must quit right after this returns True.
+    Start a detached helper script that waits for this process to exit, applies
+    the update, and relaunches the app afterwards. The caller must quit right
+    after this returns True.
+
+    Two update types are supported:
+      - installer   : run the Setup exe (for installed copies in Program Files)
+      - portable_exe: backup + overwrite the running EXE (for portable copies)
 
     `from_version` is only used for the statistics marker — pass the running
     version so the next start can tell whether the update took effect.
     """
-    installer = str(record.get("installer_path", ""))
-    if not installer or not os.path.isfile(installer):
-        logger.warning("launch_pending_installer: installer file is missing.")
+    update_file = str(record.get("installer_path", ""))
+    if not update_file or not os.path.isfile(update_file):
+        logger.warning("launch_pending_installer: update file is missing.")
         return False
 
     if not getattr(sys, "frozen", False):
-        logger.info("Not running as a frozen exe — skipping installer handover.")
+        logger.info("Not running as a frozen exe — skipping update handover.")
         return False
 
+    asset_type = str(record.get("asset_type", "installer"))
     app_exe = sys.executable
     exe_name = os.path.basename(app_exe)
     script_path = str(updates_dir() / "run_update.cmd")
 
-    for p in (installer, app_exe, script_path):
+    for p in (update_file, app_exe, script_path):
         if not _is_safe_script_path(p):
             logger.error(f"Updater: refusing to build helper script for unsafe path: {p}")
             return False
@@ -232,28 +249,50 @@ def launch_pending_installer(record: dict, from_version: str = "") -> bool:
     # Wait for the app to be gone before touching its files: with a PyInstaller
     # onefile build the bootloader parent outlives the Python child briefly and
     # keeps the exe locked, so we wait on the image name, not on a PID.
-    # After the installer returns we start the app again — on success the
-    # installer's own "launch app" step may already have done so, which is
-    # harmless: the single-instance mutex turns the second start into a no-op.
-    script = f"""@echo off
+    wait_block = f"""@echo off
 setlocal disabledelayedexpansion
 set /a _tries=0
 
 :waitloop
 tasklist /fi "imagename eq {exe_name}" /nh 2>nul | find /i "{exe_name}" >nul
-if errorlevel 1 goto runsetup
+if errorlevel 1 goto apply
 set /a _tries+=1
-if %_tries% GEQ 60 goto runsetup
+if %_tries% GEQ 60 goto apply
 timeout /t 1 /nobreak >nul
 goto waitloop
 
-:runsetup
-start "" /wait "{installer}"
+"""
+
+    if asset_type == "portable_exe":
+        # Backup old exe, overwrite with new one, rollback on failure.
+        apply_block = f""":apply
+copy /y "{app_exe}" "{app_exe}.bak" >nul 2>&1
+copy /y "{update_file}" "{app_exe}"
+if errorlevel 1 (
+  copy /y "{app_exe}.bak" "{app_exe}" >nul 2>&1
+  goto restart
+)
+del /f /q "{app_exe}.bak" >nul 2>&1
+del /f /q "{update_file}" >nul 2>&1
+goto restart
+
+"""
+    else:
+        # Installer: run it, then discard on success.
+        apply_block = f""":apply
+start "" /wait "{update_file}"
 rem Exit code 0 means the installer finished; only then is it safe to discard.
-if not errorlevel 1 del /f /q "{installer}" >nul 2>&1
+if not errorlevel 1 del /f /q "{update_file}" >nul 2>&1
+goto restart
+
+"""
+
+    restart_block = f""":restart
 start "" "{app_exe}"
 del /f /q "%~f0" >nul 2>&1
 """
+
+    script = wait_block + apply_block + restart_block
 
     try:
         updates_dir().mkdir(parents=True, exist_ok=True)
@@ -278,7 +317,7 @@ del /f /q "%~f0" >nul 2>&1
         return False
 
     record_update_attempt(from_version, str(record.get("version", "")))
-    logger.info(f"Update handover scheduled: {installer}")
+    logger.info(f"Update handover scheduled ({asset_type}): {update_file}")
     return True
 
 
@@ -326,6 +365,7 @@ class UpdaterManager(QObject):
         self.update_file_path = None
         self.latest_version = ""
         self._asset_name = ""
+        self._asset_type = "installer"
         self._changelog = ""
         self._checksum_url = ""
         self._is_downloading = False
@@ -355,15 +395,22 @@ class UpdaterManager(QObject):
                     checksum_url = ""
                     obj_type = "browser"
 
-                    # Only the installer is a valid auto-update target; the
-                    # portable exe cannot replace an installed copy.
+                    # Pick the asset that matches the running copy:
+                    #   installed copy  -> Setup installer
+                    #   portable copy   -> GUI portable exe (SSHDriveMgr.exe, not -cli)
+                    _want_installer = is_installed_copy()
                     for asset in data.get("assets", []):
                         name = asset.get("name", "")
                         low = name.lower()
-                        if low.endswith(".exe") and "setup" in low and not download_url:
-                            download_url = asset.get("browser_download_url", "")
-                            asset_name = name
-                            obj_type = "installer"
+                        if not download_url:
+                            if _want_installer and low.endswith(".exe") and "setup" in low:
+                                download_url = asset.get("browser_download_url", "")
+                                asset_name = name
+                                obj_type = "installer"
+                            elif not _want_installer and low == "sshdrivemgr.exe":
+                                download_url = asset.get("browser_download_url", "")
+                                asset_name = name
+                                obj_type = "portable_exe"
                         if name in ("sha256sums.txt", "checksums.txt", "SHA256SUMS"):
                             checksum_url = asset.get("browser_download_url", "")
 
@@ -375,6 +422,7 @@ class UpdaterManager(QObject):
 
                     self.latest_version = latest_version_tag
                     self._asset_name = asset_name
+                    self._asset_type = obj_type
                     self._changelog = changelog
                     self._checksum_url = checksum_url
                     self.update_available.emit(latest_version_tag, changelog, download_url, obj_type)
@@ -431,6 +479,7 @@ class UpdaterManager(QObject):
                     file_name,
                     changelog=self._changelog,
                     install_on_next_start=True,
+                    asset_type=self._asset_type,
                 )
                 self.download_finished.emit(True, self.update_file_path)
             except Exception as e:
