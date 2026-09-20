@@ -233,15 +233,22 @@ def init_db() -> None:
                 _db_logger.warning(
                     f"Migration: Spalte {table}.{column} konnte nicht angelegt werden: {exc}"
                 )
-            if "UNIQUE" not in ddl.upper():
+            # Bug fix: previously we checked `"UNIQUE" not in ddl.upper()` and
+            # retried with `ddl.upper().replace('UNIQUE', '').strip()`. That
+            # upper-cased the whole DDL including string default literals like
+            # 'en' → 'EN', silently writing wrong default values. Use a
+            # case-insensitive regex to drop the UNIQUE keyword only.
+            import re
+            if not re.search(r'\bUNIQUE\b', ddl, flags=re.IGNORECASE):
                 return
             # SQLite cannot add a UNIQUE column to an existing table. The column
             # itself matters more than the constraint (the values are random
-            # 64-byte keys), so retry without it instead of leaving it missing.
+            # 64-byte keys), so retry without UNIQUE instead of leaving it
+            # missing.
+            new_ddl = re.sub(r'\bUNIQUE\b', '', ddl, flags=re.IGNORECASE).strip()
             try:
                 conn.execute(
-                    f"ALTER TABLE {table} ADD COLUMN {column} "
-                    f"{ddl.upper().replace('UNIQUE', '').strip()}"
+                    f"ALTER TABLE {table} ADD COLUMN {column} {new_ddl}"
                 )
                 _db_logger.info(
                     f"Migration: {table}.{column} ohne UNIQUE-Constraint angelegt"

@@ -74,18 +74,46 @@ class TerminalBridgeServer:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def start(self):
+    def start(self) -> bool:
+        """Start the bridge. Returns True on success, False on failure.
+
+        Previously a failure inside _serve() (e.g. missing `websockets`
+        module or bind failure) left `ready` unset, `start()` would
+        time out 10 s later with no error surfaced, and self._loop was
+        never run_forever() — leaving the bridge in a broken half-init
+        state. We now capture the exception in the worker thread and
+        surface it to the caller.
+        """
         self._loop = asyncio.new_event_loop()
         ready = threading.Event()
+        # Exception container shared with the worker thread; set when
+        # _serve() raises before ready can be signalled.
+        start_error: list = []
 
         def _run():
             asyncio.set_event_loop(self._loop)
-            self._loop.run_until_complete(self._serve(ready))
+            try:
+                self._loop.run_until_complete(self._serve(ready))
+            except Exception as exc:
+                start_error.append(exc)
+                ready.set()  # unblock start() so it can report the error
+                return
             self._loop.run_forever()
 
         self._thread = threading.Thread(target=_run, daemon=True, name="TerminalBridge")
         self._thread.start()
         ready.wait(timeout=10)
+        if start_error:
+            exc = start_error[0]
+            logger.error("Terminal bridge failed to start: %s", exc)
+            self._loop = None
+            return False
+        if self._port == 0:
+            # ready was never set (timeout) and no exception captured.
+            logger.error("Terminal bridge failed to start: timed out")
+            self._loop = None
+            return False
+        return True
 
     def stop(self):
         if self._loop is None:
@@ -333,7 +361,7 @@ class TerminalBridgeServer:
             logger.debug("Terminal: WebSocket disconnected for %s", conn_id)
 
     async def _ssh_to_ws(self, session: TerminalSession):
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         while True:
             try:
                 data = await loop.run_in_executor(None, self._recv_channel, session.channel)

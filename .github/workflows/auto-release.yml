@@ -37,7 +37,7 @@ jobs:
 
       - name: Build executables
         shell: powershell
-        run: .\build_dual.ps1
+        run: .\build_dual.ps1 -OneDir
 
       - name: Verify build output
         shell: pwsh
@@ -46,7 +46,21 @@ jobs:
           Get-ChildItem dist -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.Name): $([math]::Round($_.Length/1MB, 2)) MB" }
           if (-not (Test-Path dist/SSHDriveMgr.exe)) { throw "SSHDriveMgr.exe not found!" }
           if (-not (Test-Path dist/SSHDriveMgr-cli.exe)) { throw "SSHDriveMgr-cli.exe not found!" }
+          if (-not (Test-Path dist/SSHDriveMgr-onedir/SSHDriveMgr.exe)) { throw "SSHDriveMgr-onedir not found!" }
           Write-Host "Build output verified."
+
+      - name: Package onedir build as zip
+        shell: pwsh
+        run: |
+          $version = (Get-Content src/version.txt -Raw).Trim()
+          $zip = "dist/SSHDriveMgr-onedir-$version.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          # -Path ".../*" zips the folder CONTENTS at the archive root, so
+          # extracting produces SSHDriveMgr.exe + _internal\ directly.
+          Compress-Archive -Path "dist/SSHDriveMgr-onedir/*" -DestinationPath $zip -CompressionLevel Optimal
+          $mb = [math]::Round((Get-Item $zip).Length/1MB, 1)
+          Write-Host "Created $zip ($mb MB)"
+          echo "ONEDIR_ZIP=$zip" >> $env:GITHUB_ENV
 
       - name: Install Inno Setup
         shell: pwsh
@@ -75,7 +89,7 @@ jobs:
         shell: pwsh
         run: |
           $installer = Get-ChildItem dist_installer\*.exe | Select-Object -First 1 -ExpandProperty FullName
-          $files = @('.\dist\SSHDriveMgr.exe', '.\dist\SSHDriveMgr-cli.exe', $installer)
+          $files = @('.\dist\SSHDriveMgr.exe', '.\dist\SSHDriveMgr-cli.exe', $env:ONEDIR_ZIP, $installer)
           $lines = foreach ($f in $files) {
             $h = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
             "$h  $([System.IO.Path]::GetFileName($f))"
@@ -105,6 +119,7 @@ jobs:
           $assets = @(
             @{ Path = ".\dist\SSHDriveMgr.exe"; Name = "SSHDriveMgr.exe" },
             @{ Path = ".\dist\SSHDriveMgr-cli.exe"; Name = "SSHDriveMgr-cli.exe" },
+            @{ Path = $env:ONEDIR_ZIP; Name = (Split-Path $env:ONEDIR_ZIP -Leaf) },
             @{ Path = $installer; Name = (Split-Path $installer -Leaf) },
             @{ Path = ".\sha256sums.txt"; Name = "sha256sums.txt" }
           )

@@ -26,25 +26,54 @@ if len(sys.argv) > 1 and sys.argv[1] == "--pass-helper":
     GENERIC_READ = 0x80000000
     GENERIC_WRITE = 0x40000000
     OPEN_EXISTING = 3
-    
-    handle = ctypes.windll.kernel32.CreateFileW(
+
+    # Declare kernel32 signatures explicitly: without restype/argtypes,
+    # ctypes defaults to c_int (32-bit signed) which truncates 64-bit
+    # HANDLE values on 64-bit Windows and silently corrupts the handle
+    # passed to subsequent WriteFile/ReadFile/CloseHandle calls.
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateFileW.restype = ctypes.wintypes.HANDLE
+    kernel32.CreateFileW.argtypes = [
+        ctypes.wintypes.LPCWSTR,  # lpName
+        ctypes.wintypes.DWORD,    # dwAccess
+        ctypes.wintypes.DWORD,    # dwShareMode
+        ctypes.c_void_p,          # lpSecurityAttributes
+        ctypes.wintypes.DWORD,    # dwCreationDisposition
+        ctypes.wintypes.DWORD,    # dwFlagsAndAttributes
+        ctypes.wintypes.HANDLE,   # hTemplateFile
+    ]
+    kernel32.WriteFile.restype = ctypes.wintypes.BOOL
+    kernel32.WriteFile.argtypes = [
+        ctypes.wintypes.HANDLE, ctypes.c_void_p, ctypes.wintypes.DWORD,
+        ctypes.POINTER(ctypes.wintypes.DWORD), ctypes.c_void_p,
+    ]
+    kernel32.ReadFile.restype = ctypes.wintypes.BOOL
+    kernel32.ReadFile.argtypes = [
+        ctypes.wintypes.HANDLE, ctypes.c_void_p, ctypes.wintypes.DWORD,
+        ctypes.POINTER(ctypes.wintypes.DWORD), ctypes.c_void_p,
+    ]
+    kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+
+    INVALID_HANDLE_VALUE = ctypes.wintypes.HANDLE(-1).value
+    handle = kernel32.CreateFileW(
         pipe_name, GENERIC_READ | GENERIC_WRITE, 0, None, OPEN_EXISTING, 0, None
     )
-    if handle != -1:
+    if handle != INVALID_HANDLE_VALUE:
         req = json.dumps({"action": "get_askpass", "token": token}).encode('utf-8')
         written = ctypes.wintypes.DWORD()
-        ctypes.windll.kernel32.WriteFile(handle, req, len(req), ctypes.byref(written), None)
-        
+        kernel32.WriteFile(handle, req, len(req), ctypes.byref(written), None)
+
         buf = ctypes.create_string_buffer(4096)
         read = ctypes.wintypes.DWORD()
-        if ctypes.windll.kernel32.ReadFile(handle, buf, 4096, ctypes.byref(read), None):
+        if kernel32.ReadFile(handle, buf, 4096, ctypes.byref(read), None):
             try:
                 resp = json.loads(buf.value[:read.value].decode('utf-8'))
                 if resp.get("success"):
                     print(resp.get("password", ""), end="")
             except Exception:
                 pass
-        ctypes.windll.kernel32.CloseHandle(handle)
+        kernel32.CloseHandle(handle)
     sys.exit(0)
 
 # ── 0.2 Elevated Rechte-Reparatur-Helfer (via UAC-Relaunch, siehe
@@ -129,7 +158,11 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont, QIcon
 
 from src.ui.theme import STYLESHEET, get_stylesheet
-from src.ui.main_window import MainWindow
+# NOTE: MainWindow is imported lazily inside main() AFTER successful login.
+# Its module (256 KB) pulls in connection_card, system_tray, debug_window,
+# sftp_browser, sshfs_controller/psutil and many post-login-only widgets;
+# importing it here forced that multi-second cost before the login dialog
+# could even appear.
 from src.database import init_db
 from src.ui.dialogs.login_dialog import LoginDialog
 from src.auth_manager import Session
@@ -191,7 +224,18 @@ def _install_global_exception_handlers():
                 box.setIcon(QMessageBox.Icon.Critical)
                 box.setWindowTitle(tr("app.unexpected_error.title"))
                 box.setText(tr("app.unexpected_error.body"))
-                copy_btn = box.addButton("Details kopieren", QMessageBox.ButtonRole.ActionRole)
+                # QMessageBox is a native top-level window: it does NOT
+                # reliably inherit the app stylesheet (it rendered light in
+                # dark mode), so apply the active theme to it explicitly.
+                try:
+                    from src.theme_manager import get_theme_manager as _gtm
+                    _tm = _gtm()
+                    _theme_ss = _tm.load_theme(_tm.current_theme())
+                    if _theme_ss:
+                        box.setStyleSheet(_theme_ss)
+                except Exception:
+                    pass
+                copy_btn = box.addButton(tr("app.unexpected_error.copy_details"), QMessageBox.ButtonRole.ActionRole)
                 copy_btn.setIcon(svg_icon("copy", "#ffffff", 14))
                 copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(err_text))
                 box.addButton(QMessageBox.StandardButton.Ok)
@@ -258,15 +302,44 @@ def main():
     except Exception:
         pass
 
-    # QtWebEngineWidgets MUST be imported before QApplication is created.
-    try:
-        from PyQt6.QtWebEngineWidgets import QWebEngineView as _QWebEngineView  # noqa: F401
-        from PyQt6.QtWebEngineCore import QWebEnginePage as _QWebEnginePage    # noqa: F401
-        from PyQt6.QtWebChannel import QWebChannel as _QWebChannel              # noqa: F401
-    except ImportError:
-        pass  # xterm terminal feature unavailable; app still runs without it
+    # QtWebEngineWidgets must be imported before QApplication is created — OR
+    # AA_ShareOpenGLContexts must be set before creation. terminal_panel.py
+    # imports QtWebEngineWidgets lazily on first terminal open, so if the
+    # early import below ever fails (it did once in the packaged build, and
+    # the silent except hid it), the AA flag still lets that late import
+    # succeed instead of crashing with "must be imported before
+    # QCoreApplication".
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
+    # SSHNO_EARLY_WEBENGINE=1 (diagnostics): skip the pre-app import entirely.
+    # terminal_panel.py imports QtWebEngineWidgets lazily, and with
+    # AA_ShareOpenGLContexts set that late import is legal — the early import
+    # is belt-and-braces only.
+    if not os.environ.get("SSHNO_EARLY_WEBENGINE"):
+        try:
+            from PyQt6.QtWebEngineWidgets import QWebEngineView as _QWebEngineView  # noqa: F401
+            from PyQt6.QtWebEngineCore import QWebEnginePage as _QWebEnginePage    # noqa: F401
+            from PyQt6.QtWebChannel import QWebChannel as _QWebChannel              # noqa: F401
+        except ImportError as _e:
+            # xterm terminal feature unavailable; app still runs without it.
+            # Log it — never silently pass again, that masked a real defect.
+            _early_msg = f"QtWebEngine early import failed: {_e!r}"
+            try:
+                from src.app_logger import logger as _logger
+                _logger.warning(_early_msg)
+            except Exception:
+                pass
+            print(_early_msg, file=sys.stderr)
 
     app = QApplication(sys.argv)
+
+    # Diagnostic probe (set SSHDEBUG_WEBENGINE=1): emulate terminal_panel's
+    # late QtWebEngineWidgets import and report the outcome to stderr.
+    if os.environ.get("SSHDEBUG_WEBENGINE"):
+        try:
+            from PyQt6.QtWebEngineWidgets import QWebEngineView as _probe_wv  # noqa: F401
+            print("PROBE late QtWebEngineWidgets import: OK", file=sys.stderr)
+        except Exception as _pe:
+            print(f"PROBE late QtWebEngineWidgets import FAILED: {_pe!r}", file=sys.stderr)
     app_name = display_name()
     app.setApplicationName(app_name)
     app.setApplicationDisplayName(app_name)
@@ -328,28 +401,12 @@ def main():
 
     init_db()
 
-    # ── 3.5 Windows Auto-Login (wenn aktiviert) ────────────────────
-    windows_user = os.environ.get("USERNAME", "").strip()
-    if windows_user:
-        from src.auth_manager import AuthManager, Session
-        user_data = AuthManager.get_user_by_username(windows_user)
-        if user_data:
-            # Prüfe ob Auto-Login aktiviert ist für diesen Benutzer
-            from src.database import get_connection
-            with get_connection() as conn:
-                row = conn.execute(
-                    "SELECT auto_login FROM app_settings WHERE user_id = ?",
-                    (user_data["id"],)
-                ).fetchone()
-                auto_login_enabled = row and bool(row["auto_login"])
-            
-            if auto_login_enabled:
-                logger.info(f"Windows Auto-Login: Benutzer '{windows_user}' gefunden.")
-                # Für Auto-Login ohne Passwort können wir den Encryption Key nicht laden
-                # Wir zeigen trotzdem den Login-Dialog, aber mit vorausgefülltem Benutzernamen
-                # Der Benutzer muss nur das Passwort eingeben
-            else:
-                logger.debug(f"Auto-Login deaktiviert für '{windows_user}'")
+    # NOTE: a previous "Windows Auto-Login" probe here read USERNAME,
+    # looked up the user, checked app_settings.auto_login — and then
+    # did nothing with the result (the comment described pre-filling
+    # the login dialog, but no such API existed). Removed because it
+    # was dead code. Real pre-fill is handled independently by
+    # LoginDialog._load_remembered_credentials() via machine_crypto.
 
     # Don't quit when the last window is hidden (needed because the login
     # dialog hides itself during auth to avoid UI jitter — if we quit on
@@ -432,6 +489,12 @@ def main():
         sys.exit(0)
 
     try:
+        # Imported lazily (see note at top): the loading splash shown by the
+        # login dialog is already on screen here, so the multi-second import
+        # of MainWindow and its post-login-only dependencies happens behind
+        # the splash instead of blocking the login window.
+        from src.ui.main_window import MainWindow
+
         # Create and show main window (maximiert mit Titelleiste)
         window = MainWindow()
         # Move off-screen IMMEDIATELY after construction. setWindowFlag() inside
@@ -479,8 +542,24 @@ def main():
     except Exception as e:
         err_msg = f"FATAL CRASH during startup/main loop: {e}\n{traceback.format_exc()}"
         print(err_msg, file=sys.stderr)
-        with open("crash_report.txt", "w", encoding="utf-8") as f:
-            f.write(err_msg)
+        # Write next to the other diagnostics (in %APPDATA%\SSHDriveMgr\)
+        # and restrict ACLs to the current user, matching the global
+        # exception handler. A bare "crash_report.txt" in CWD could
+        # leak stack traces (with host/user names) to anyone with read
+        # access to the launch directory (CWE-732).
+        try:
+            appdata = os.environ.get("APPDATA", str(Path.home()))
+            crash_path = Path(appdata) / "SSHDriveMgr" / "crash_report.txt"
+            crash_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(crash_path, "w", encoding="utf-8") as f:
+                f.write(err_msg)
+            try:
+                from src.database import _set_secure_permissions
+                _set_secure_permissions(crash_path)
+            except Exception:
+                pass
+        except Exception:
+            pass
         try:
             from src.app_logger import logger
             logger.error(err_msg)

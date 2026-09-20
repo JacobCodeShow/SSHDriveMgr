@@ -31,12 +31,33 @@ try:
 except ImportError:
     _CRYPTO_AVAILABLE = False
 
-try:
-    import keyring
-    _KEYRING_AVAILABLE = True
-except ImportError:
-    keyring = None
-    _KEYRING_AVAILABLE = False
+# keyring is imported LAZILY (see _get_keyring). Importing it costs ~2.5s
+# (it drags in jaraco/importlib.metadata/urllib chain) and none of its
+# functions are on the login/encryption hot path — the Credential Manager
+# helpers are only invoked explicitly. Importing it at module top made that
+# cost land on the pre-login startup critical path.
+# _KEYRING_AVAILABLE: None = not probed yet, True/False = cached result.
+_KEYRING_AVAILABLE: Optional[bool] = None
+keyring = None  # populated on first _get_keyring() use
+
+
+def _get_keyring():
+    """Import and return keyring on first use; cache the result.
+
+    Returns the keyring module when available, otherwise None. Safe to call
+    repeatedly — the expensive import happens at most once.
+    """
+    global keyring, _KEYRING_AVAILABLE
+    if _KEYRING_AVAILABLE is None:
+        try:
+            import keyring as _kr
+            keyring = _kr
+            _KEYRING_AVAILABLE = True
+        except ImportError:
+            keyring = None
+            _KEYRING_AVAILABLE = False
+    return keyring if _KEYRING_AVAILABLE else None
+
 
 from src.utils.secure_memory import SecureBytes, secure_wipe_bytes
 
@@ -189,11 +210,12 @@ def store_key_in_credential_manager(key_hex: str, username: str = _KEYRING_USERN
     Returns:
         True if successful, False otherwise
     """
-    if not _KEYRING_AVAILABLE:
+    kr = _get_keyring()
+    if kr is None:
         return False
-    
+
     try:
-        keyring.set_password(_KEYRING_SERVICE, username, key_hex)
+        kr.set_password(_KEYRING_SERVICE, username, key_hex)
         return True
     except Exception:
         return False
@@ -209,11 +231,12 @@ def retrieve_key_from_credential_manager(username: str = _KEYRING_USERNAME) -> O
     Returns:
         The key as hex string, or None if not found
     """
-    if not _KEYRING_AVAILABLE:
+    kr = _get_keyring()
+    if kr is None:
         return None
-    
+
     try:
-        return keyring.get_password(_KEYRING_SERVICE, username)
+        return kr.get_password(_KEYRING_SERVICE, username)
     except Exception:
         return None
 
@@ -228,11 +251,12 @@ def delete_key_from_credential_manager(username: str = _KEYRING_USERNAME) -> boo
     Returns:
         True if successful, False otherwise
     """
-    if not _KEYRING_AVAILABLE:
+    kr = _get_keyring()
+    if kr is None:
         return False
-    
+
     try:
-        keyring.delete_password(_KEYRING_SERVICE, username)
+        kr.delete_password(_KEYRING_SERVICE, username)
         return True
     except Exception:
         return False
@@ -322,8 +346,12 @@ def is_available() -> bool:
 
 
 def is_keyring_available() -> bool:
-    """Check if keyring (Windows Credential Manager) is available."""
-    return _KEYRING_AVAILABLE
+    """Check if keyring (Windows Credential Manager) is available.
+
+    Probes (and caches) the lazy import on first call so the answer is
+    accurate without paying the cost at module import time.
+    """
+    return _get_keyring() is not None
 
 
 # ------------------------------------------------------------------

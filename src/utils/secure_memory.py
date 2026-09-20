@@ -27,7 +27,10 @@ class SecureBytes:
             if isinstance(data, bytes):
                 self._data = bytearray(data)
             elif isinstance(data, bytearray):
-                self._data = data
+                # Copy: sharing the caller's buffer would let external
+                # mutations corrupt our secret, and our wipe() would zero
+                # the caller's data unexpectedly.
+                self._data = bytearray(data)
             else:
                 raise TypeError("Data must be bytes, str, or bytearray")
 
@@ -44,9 +47,14 @@ class SecureBytes:
         return False
 
     def __del__(self):
-        # Attempt to wipe on garbage collection
-        if not self._locked and self._data is not None:
-            self.wipe()
+        # Attempt to wipe on garbage collection. Best-effort: during
+        # interpreter shutdown the os module may already be gone, and we
+        # must never raise from __del__.
+        try:
+            if not self._locked and self._data is not None:
+                self.wipe()
+        except Exception:
+            pass
 
     def wipe(self) -> None:
         """Securely wipe the data from memory by overwriting with zeros and random data."""
@@ -63,8 +71,9 @@ class SecureBytes:
             for i in range(len(self._data)):
                 self._data[i] = 0
             self._data = None
-            # Force garbage collection
-            gc.collect()
+            # NOTE: do NOT call gc.collect() here — wipe() can be invoked
+            # from __del__ (i.e. from inside the GC), and re-entering the
+            # GC can deadlock or corrupt heap state.
 
     def get_bytes(self) -> Optional[bytes]:
         """Get the data as bytes (for use, not for long-term storage)."""

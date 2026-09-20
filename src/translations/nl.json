@@ -315,6 +315,7 @@
   "status.saved": "Wijzigingen opgeslagen.",
   "app.unexpected_error.title": "Onverwachte fout",
   "app.unexpected_error.body": "Er is een onverwachte fout opgetreden.\nDe applicatie probeert door te draaien.\n\nDetails zijn weggeschreven naar crash_report.txt.",
+  "app.unexpected_error.copy_details": "Details kopiëren",
   "main.mount_all": "Alles koppelen",
   "main.dismount_all": "Alles loskoppelen",
   "main.groups_filter": "Filteren op groep",

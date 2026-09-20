@@ -315,6 +315,7 @@
   "status.saved": "更改已保存。",
   "app.unexpected_error.title": "意外错误",
   "app.unexpected_error.body": "发生意外错误。\n应用程序将尝试继续运行。\n\n详情已写入 crash_report.txt。",
+  "app.unexpected_error.copy_details": "复制详情",
   "main.mount_all": "全部挂载",
   "main.dismount_all": "全部卸载",
   "main.groups_filter": "按分组筛选",

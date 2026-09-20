@@ -1416,6 +1416,48 @@ QSpinBox::up-arrow, QSpinBox::down-arrow {
     border: none;
 }
 
+/* ---- Interval stepper (settings panel) ---------------------- */
+QWidget#intervalStepper { background-color: transparent; }
+QWidget#intervalStepper QPushButton#intervalMinusBtn,
+QWidget#intervalStepper QPushButton#intervalPlusBtn {
+    background-color: #1a1a2e; border: 1px solid #1e1e30;
+    color: #c8d6e5; font-size: 16px; font-weight: bold;
+}
+QWidget#intervalStepper QPushButton#intervalMinusBtn {
+    border-top-left-radius: 16px; border-bottom-left-radius: 16px;
+}
+QWidget#intervalStepper QPushButton#intervalPlusBtn {
+    border-top-right-radius: 16px; border-bottom-right-radius: 16px;
+}
+QWidget#intervalStepper QPushButton#intervalMinusBtn:hover,
+QWidget#intervalStepper QPushButton#intervalPlusBtn:hover {
+    background-color: #242438; border-color: #dc2626; color: #dc2626;
+}
+QWidget#intervalStepper QPushButton#intervalMinusBtn:pressed,
+QWidget#intervalStepper QPushButton#intervalPlusBtn:pressed {
+    background-color: #2e2e4a;
+}
+QWidget#intervalStepper QSpinBox {
+    background-color: #14141f; border: 1px solid #1e1e30;
+    color: #c8d6e5; font-size: 14px; font-weight: bold;
+    padding: 0px; min-height: 30px; max-height: 30px;
+}
+QWidget#intervalStepper QSpinBox:focus {
+    border: 1px solid #dc2626; background-color: #16162a;
+}
+QWidget#intervalStepper QSpinBox::up-button,
+QWidget#intervalStepper QSpinBox::down-button { width: 0px; height: 0px; }
+
+/* ---- Theme menu button (settings panel) --------------------- */
+QToolButton#themeMenuBtn {
+    background-color: #dc2626; border: 1px solid #a81d1d;
+    border-radius: 6px; color: #ffffff;
+    font-size: 15px; font-weight: bold;
+}
+QToolButton#themeMenuBtn:hover { background-color: #ef4444; border-color: #dc2626; }
+QToolButton#themeMenuBtn:pressed { background-color: #a81d1d; }
+QToolButton#themeMenuBtn::menu-indicator { image: none; }
+
 QComboBox::drop-down { border: none; width: 30px; }
 QComboBox::down-arrow {
     image: url("__CHEVRON_URL__");

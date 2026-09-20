@@ -315,6 +315,7 @@
   "status.saved": "Cambios guardados.",
   "app.unexpected_error.title": "Error inesperado",
   "app.unexpected_error.body": "Se ha producido un error inesperado.\nLa aplicación intentará seguir funcionando.\n\nLos detalles se han escrito en crash_report.txt.",
+  "app.unexpected_error.copy_details": "Copiar detalles",
   "main.mount_all": "Montar todo",
   "main.dismount_all": "Desmontar todo",
   "main.groups_filter": "Filtrar por grupo",

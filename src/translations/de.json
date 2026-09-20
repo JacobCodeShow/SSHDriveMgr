@@ -315,6 +315,7 @@
   "status.saved": "Änderungen gespeichert.",
   "app.unexpected_error.title": "Unerwarteter Fehler",
   "app.unexpected_error.body": "Ein unerwarteter Fehler ist aufgetreten.\nDie Anwendung versucht weiterzulaufen.\n\nDetails wurden in crash_report.txt protokolliert.",
+  "app.unexpected_error.copy_details": "Details kopieren",
   "main.mount_all": "Alle mounten",
   "main.dismount_all": "Alle trennen",
   "main.groups_filter": "Nach Gruppe filtern",

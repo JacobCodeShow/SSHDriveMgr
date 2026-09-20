@@ -63,7 +63,11 @@ def _read_windows_machine_guid() -> str:
 
 
 def _get_mac_address() -> str:
-    """Return the first MAC address as a 48-bit integer string."""
+    """Return the first MAC address as a 12-character lowercase hex string.
+
+    Empty string is returned when no real MAC could be determined (uuid
+    returns a random value with the multicast bit set in that case).
+    """
     try:
         node = uuid.getnode()
         # uuid.getnode() returns a 48-bit int; if it can't find a real MAC

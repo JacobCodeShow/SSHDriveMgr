@@ -1,17 +1,29 @@
 # -*- mode: python ; coding: utf-8 -*-
+# SSHDriveMgr — onedir comparison build.
+#
+# Identical Analysis + trimming logic as SSHDriveMgr.spec (KEEP THEM IN SYNC —
+# if you change hiddenimports/excludes/_KEEP_QT_DLLS/_DROP_QML_SUBTREES/
+# _DROP_BINARY_NAMES in one, change the other). The only difference is the
+# final packaging step:
+#
+#   onefile (SSHDriveMgr.spec): single exe; every launch re-extracts ~140 MB
+#     to a fresh %TEMP%\_MEIxxxx folder → slow cold start, leaves temp litter
+#     if the process is killed, but distributes as one file.
+#
+#   onedir (this file): dist\SSHDriveMgr-onedir\{SSHDriveMgr.exe,_internal\...}
+#     → no extraction at launch, much faster cold start and smaller on-disk
+#     footprint duplicated once; distribute the whole folder (zip it or wrap
+#     it in an installer).
+#
+# All runtime resource lookups use sys._MEIPASS (which PyInstaller points at
+# <onedir>\_internal in this mode), so no application code changes are needed.
 import re
+
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    # Only resources the app reads from disk at runtime:
-    #  - src/translations/*.json  (src/i18n.py: _MEIPASS/src/translations)
-    #  - src/version.txt          (single_instance/main_window/about/login read
-    #                              it relative to their own __file__)
-    #  - assets/                  (icons + terminal/xterm.js HTML/JS/CSS)
-    # The old ('src', 'src') mapping also shipped every .py (bytecode already
-    # lives in the PYZ) and the whole __pycache__ tree — pure duplication.
     datas=[
         ('src/translations', 'src/translations'),
         ('src/version.txt', 'src'),
@@ -21,9 +33,6 @@ a = Analysis(
         'PyQt6.sip',
         'win32api', 'win32con', 'winreg',
         'keyring', 'keyring.backends.Windows',
-        # src/permission_repair.py's UAC relaunch (request_elevated_repair) —
-        # PyInstaller's static analysis has a history of missing win32com's
-        # compiled COM shell extension unless hinted explicitly.
         'win32com.shell', 'win32com.shell.shell', 'win32com.shell.shellcon',
         'win32event', 'win32process',
     ],
@@ -31,18 +40,9 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # Only modules nothing pulls in at runtime: stdlib excludes like
-        # 'email'/'http'/'xml' break urllib.request and save almost nothing
-        # next to Qt WebEngine.
         'tkinter',
         '_pytest', 'pytest',
-        # Dev/build tooling that hooks pull in but the app never imports
         'setuptools', '_distutils_hack', 'pip',
-        # PyQt6 *bindings* the app never imports (grep-verified: only
-        # sip/QtCore/QtGui/QtWidgets/QtSvg/QtWebChannel/QtWebEngineCore/
-        # QtWebEngineWidgets are used). The native Qt6Qml/Quick DLLs are a
-        # real dependency of WebEngineCore and are kept separately by the
-        # binary whitelist below; the Python wrappers for them are not.
         # NOTE: QtNetwork/QtPositioning/QtPrintSupport/QtQml/QtQuick/
         # QtQuickWidgets/QtOpenGL/QtOpenGLWidgets bindings must stay INCLUDED:
         # QtWebEngineWidgets' module init imports them (excluding QtPrintSupport
@@ -61,10 +61,6 @@ a = Analysis(
     optimize=0,
 )
 
-# QtWebEngine (Chromium) ships debug-only resource variants and translations
-# for ~50 locales we never use. In --onefile mode every one of these bytes is
-# re-extracted to a fresh %TEMP%\_MEI... folder on every single app launch, so
-# trimming this data cuts both the exe size and the startup extraction time.
 _KEEP_QM_LANGS = {'en', 'de'}
 
 def _keep_datafile(entry):
@@ -80,15 +76,6 @@ def _keep_datafile(entry):
 
 a.datas = [d for d in a.datas if _keep_datafile(d)]
 
-# ── Binary/data trimming, evidence-based ───────────────────────────────────
-# The PyQt6 wheel installs ~110 Qt6 DLLs; PyInstaller's hook collects them
-# wholesale. The set below is the *transitive PE import closure* of the exact
-# Qt modules the app loads (QtCore/Gui/Widgets/WebEngineCore/WebEngineWidgets/
-# WebChannel) plus QtWebEngineProcess.exe — computed with pefile against the
-# installed wheel. Everything else (Quick3D, QuickControls2, Multimedia, Pdf,
-# Designer, ...) is never mapped into the process. Rerun the closure analysis
-# when upgrading PyQt6 before shipping: if WebEngine ever starts importing one
-# of these, its DLL simply needs adding to this set.
 _KEEP_QT_DLLS = {
     'qt6core.dll', 'qt6gui.dll', 'qt6network.dll', 'qt6opengl.dll',
     'qt6positioning.dll', 'qt6printsupport.dll', 'qt6qml.dll',
@@ -98,9 +85,6 @@ _KEEP_QT_DLLS = {
     'qt6webenginecore.dll', 'qt6webenginewidgets.dll', 'qt6widgets.dll',
 }
 
-# QML plugin subtrees for QML-only UI frameworks the app never instantiates
-# (it embeds QWebEngineView in QWidgets; no QQmlApplicationEngine exists).
-# Core qml/QtQml and qml/QtQuick basics are intentionally retained.
 _DROP_QML_SUBTREES = (
     'qt6/qml/qtquick3d/',
     'qt6/qml/qtquick/controls',
@@ -121,25 +105,17 @@ _DROP_QML_SUBTREES = (
     'qt6/qml/qtwebsockets/',
 )
 
-# opengl32sw.dll is a 20 MB CPU-only OpenGL fallback that Qt loads ONLY when
-# no hardware OpenGL driver exists. Qt6 on Windows uses the D3D11/D3D12 RHI by
-# default and Chromium carries its own ANGLE/SwiftShader, so it is safe for
-# ordinary hardware. Re-enable (delete this name) if you must support remote
-# sessions/virtualised GPUs that force the software OpenGL path.
 _DROP_BINARY_NAMES = {'opengl32sw.dll', 'mfc140u.dll'}
 
 def _keep_binary(entry):
     dest = entry[0].replace('\\', '/').lower()
     base = dest.rsplit('/', 1)[-1]
-    # Qt6/bin Qt6*.dll: whitelist by import closure
     if '/qt6/bin/' in dest and base.startswith('qt6') and base.endswith('.dll'):
         return base in _KEEP_QT_DLLS
     # orphan plugins whose native deps (Qt6Pdf / Qt6SerialPort) are deliberately
     # not shipped: PDF image reader and GPS-NMEA position source — unused here
     if '/plugins/imageformats/qpdf.dll' in dest or '/plugins/position/' in dest:
         return False
-    # MFC runtime only needed by win32ui/Pythonwin (MFC GUI extensions);
-    # win32com.shell.shell (UAC relaunch) uses pythoncom/pywintypes, not MFC
     if '/pythonwin/' in dest or base in _DROP_BINARY_NAMES:
         return False
     return True
@@ -156,19 +132,19 @@ a.datas = [d for d in a.datas if _keep_qml_data(d)]
 
 pyz = PYZ(a.pure)
 
+# onedir EXE: exclude_binaries=True so binaries/datas go to COLLECT, not
+# into the exe. a.scripts still includes the bootloader script.
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='SSHDriveMgr',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
     upx_exclude=[],
-    runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -177,4 +153,14 @@ exe = EXE(
     entitlements_file=None,
     version='file_version_info.txt',
     icon=['assets\\app_icon.ico'],
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name='SSHDriveMgr-onedir',
 )

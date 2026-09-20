@@ -3,7 +3,6 @@ PyQt6-WebEngine==6.11.0
 pywin32==311
 pyinstaller==6.20.0
 pytest==9.0.3
-pillow==12.2.0
 cryptography==48.0.0
 paramiko==4.0.0
 keyring==25.7.0

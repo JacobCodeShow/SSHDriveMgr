@@ -23,6 +23,39 @@ def _handle_cli_connect(key: str, exec_cmd: str = None) -> int:
     PIPE_READMODE_MESSAGE = 0x00000002
     kernel32 = ctypes.windll.kernel32
 
+    # Declare signatures explicitly so 64-bit Windows HANDLE values are
+    # not truncated to c_int (32-bit) by ctypes' default restype, which
+    # would silently corrupt the handle in subsequent WriteFile/ReadFile
+    # /CloseHandle/SetNamedPipeHandleState calls.
+    kernel32.WaitNamedPipeW.restype = ctypes.wintypes.BOOL
+    kernel32.WaitNamedPipeW.argtypes = [ctypes.wintypes.LPCWSTR, ctypes.wintypes.DWORD]
+    kernel32.CreateFileW.restype = ctypes.wintypes.HANDLE
+    kernel32.CreateFileW.argtypes = [
+        ctypes.wintypes.LPCWSTR,  # lpName
+        ctypes.wintypes.DWORD,    # dwAccess
+        ctypes.wintypes.DWORD,    # dwShareMode
+        ctypes.c_void_p,          # lpSecurityAttributes
+        ctypes.wintypes.DWORD,    # dwCreationDisposition
+        ctypes.wintypes.DWORD,    # dwFlagsAndAttributes
+        ctypes.wintypes.HANDLE,   # hTemplateFile
+    ]
+    kernel32.SetNamedPipeHandleState.restype = ctypes.wintypes.BOOL
+    kernel32.SetNamedPipeHandleState.argtypes = [
+        ctypes.wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+    ]
+    kernel32.WriteFile.restype = ctypes.wintypes.BOOL
+    kernel32.WriteFile.argtypes = [
+        ctypes.wintypes.HANDLE, ctypes.c_void_p, ctypes.wintypes.DWORD,
+        ctypes.POINTER(ctypes.wintypes.DWORD), ctypes.c_void_p,
+    ]
+    kernel32.ReadFile.restype = ctypes.wintypes.BOOL
+    kernel32.ReadFile.argtypes = [
+        ctypes.wintypes.HANDLE, ctypes.c_void_p, ctypes.wintypes.DWORD,
+        ctypes.POINTER(ctypes.wintypes.DWORD), ctypes.c_void_p,
+    ]
+    kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+
     if not kernel32.WaitNamedPipeW(pipe_name, 10000):
         print("Fehler: SSH Win Manager muss gestartet und eingeloggt sein.")
         return 1
@@ -34,7 +67,8 @@ def _handle_cli_connect(key: str, exec_cmd: str = None) -> int:
         3,  # OPEN_EXISTING
         0, None
     )
-    if h_pipe == -1:
+    INVALID_HANDLE_VALUE = ctypes.wintypes.HANDLE(-1).value
+    if h_pipe == INVALID_HANDLE_VALUE:
         print("Fehler: Konnte nicht mit SSH Win Manager kommunizieren.")
         return 1
 

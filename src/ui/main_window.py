@@ -21,7 +21,11 @@ import json
 import subprocess
 from urllib.parse import quote
 
-# SECURITY FIX (FINDING-01): imports for named-pipe DACL and IPC rate limiting
+# win32security/win32api/ntsecuritycon are also imported at module load by
+# src.database (ACL hardening) and src.permission_repair (ownership repair),
+# both of which run on the pre-login startup path — so they are already in
+# sys.modules by the time this module loads; importing win32con here too costs
+# effectively nothing and keeps the IPC DACL code straightforward.
 import win32security
 import win32api
 import win32con
@@ -332,6 +336,44 @@ class MainWindow(FramelessMainWindow):
         _IPC_MAX_FAILS = 10
         _IPC_WINDOW_SEC = 60.0
 
+        # Declare kernel32 signatures explicitly so 64-bit Windows HANDLE
+        # values are not truncated to c_int by ctypes' default restype.
+        # Without this, CreateNamedPipeW/ConnectNamedPipe/ReadFile/etc.
+        # can return/truncate handles on 64-bit Windows, silently
+        # corrupting subsequent calls. (Bug 6 / CWE-628.)
+        _k32 = ctypes.windll.kernel32
+        _k32.CreateNamedPipeW.restype = ctypes.wintypes.HANDLE
+        _k32.CreateNamedPipeW.argtypes = [
+            ctypes.wintypes.LPCWSTR, ctypes.wintypes.DWORD, ctypes.wintypes.DWORD,
+            ctypes.wintypes.DWORD, ctypes.wintypes.DWORD, ctypes.wintypes.DWORD,
+            ctypes.wintypes.DWORD, ctypes.c_void_p,
+        ]
+        _k32.ConnectNamedPipe.restype = ctypes.wintypes.BOOL
+        _k32.ConnectNamedPipe.argtypes = [ctypes.wintypes.HANDLE, ctypes.c_void_p]
+        _k32.ReadFile.restype = ctypes.wintypes.BOOL
+        _k32.ReadFile.argtypes = [
+            ctypes.wintypes.HANDLE, ctypes.c_void_p, ctypes.wintypes.DWORD,
+            ctypes.POINTER(ctypes.wintypes.DWORD), ctypes.c_void_p,
+        ]
+        _k32.CloseHandle.restype = ctypes.wintypes.BOOL
+        _k32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+        _k32.GetNamedPipeClientProcessId.restype = ctypes.wintypes.BOOL
+        _k32.GetNamedPipeClientProcessId.argtypes = [
+            ctypes.wintypes.HANDLE, ctypes.POINTER(ctypes.wintypes.ULONG),
+        ]
+        _k32.GetLastError.restype = ctypes.wintypes.DWORD
+        _k32.GetLastError.argtypes = []
+        _k32.WriteFile.restype = ctypes.wintypes.BOOL
+        _k32.WriteFile.argtypes = [
+            ctypes.wintypes.HANDLE, ctypes.c_void_p, ctypes.wintypes.DWORD,
+            ctypes.POINTER(ctypes.wintypes.DWORD), ctypes.c_void_p,
+        ]
+        _k32.FlushFileBuffers.restype = ctypes.wintypes.BOOL
+        _k32.FlushFileBuffers.argtypes = [ctypes.wintypes.HANDLE]
+        _k32.DisconnectNamedPipe.restype = ctypes.wintypes.BOOL
+        _k32.DisconnectNamedPipe.argtypes = [ctypes.wintypes.HANDLE]
+        _INVALID_HANDLE = ctypes.wintypes.HANDLE(-1).value
+
         def _check_rate(pid: int) -> bool:
             """Return True if this PID is within the allowed request rate."""
             now = time.monotonic()
@@ -364,10 +406,6 @@ class MainWindow(FramelessMainWindow):
                 sd = win32security.SECURITY_DESCRIPTOR()
                 sd.SetSecurityDescriptorDacl(True, dacl, False)
 
-                # Convert SD to a self-relative binary blob and store it so it
-                # stays alive for the lifetime of the pipe handle.
-                sd_bytes = sd.GetSecurityDescriptorDacl()   # keep reference
-
                 # Build a SECURITY_ATTRIBUTES struct pointing to the SD
                 class SECURITY_ATTRIBUTES(ctypes.Structure):
                     _fields_ = [
@@ -378,7 +416,8 @@ class MainWindow(FramelessMainWindow):
 
                 sa = SECURITY_ATTRIBUTES()
                 sa.nLength = ctypes.sizeof(SECURITY_ATTRIBUTES)
-                # Keep the SD object alive inside sa so GC doesn't collect it
+                # Keep the SD object alive for the lifetime of sa so GC
+                # doesn't free the buffer referenced by lpSecurityDescriptor.
                 sa._sd_obj = sd
                 # Obtain a raw pointer to the SD via win32security
                 raw_sd = win32security.ConvertStringSecurityDescriptorToSecurityDescriptor(
@@ -421,11 +460,11 @@ class MainWindow(FramelessMainWindow):
             read = ctypes.wintypes.DWORD()
             data = bytearray()
             while True:
-                ok = ctypes.windll.kernel32.ReadFile(pipe_handle, chunk, 65536, ctypes.byref(read), None)
+                ok = _k32.ReadFile(pipe_handle, chunk, 65536, ctypes.byref(read), None)
                 data.extend(chunk.raw[:read.value])
                 if ok:
                     return bytes(data)
-                if ctypes.windll.kernel32.GetLastError() != ERROR_MORE_DATA:
+                if _k32.GetLastError() != ERROR_MORE_DATA:
                     return None
                 if len(data) > MAX_MESSAGE_BYTES:
                     return None
@@ -434,25 +473,25 @@ class MainWindow(FramelessMainWindow):
             try:
                 sa = _make_pipe_security_attributes()
                 sa_ptr = ctypes.byref(sa) if sa is not None else None
-                pipe = ctypes.windll.kernel32.CreateNamedPipeW(
+                pipe = _k32.CreateNamedPipeW(
                     self._ipc_pipe_name, PIPE_ACCESS_DUPLEX,
                     PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
                     5, 1048576, 1048576, 5000,
                     sa_ptr  # SECURITY FIX (FINDING-01): proper DACL instead of None
                 )
-                if pipe == -1:
+                if pipe == _INVALID_HANDLE:
                     time.sleep(1)
                     continue
-                ctypes.windll.kernel32.ConnectNamedPipe(pipe, None)
+                _k32.ConnectNamedPipe(pipe, None)
                 if not self._ipc_running:
-                    ctypes.windll.kernel32.CloseHandle(pipe)
+                    _k32.CloseHandle(pipe)
                     break
 
                 # Determine connecting PID for rate limiting
                 connecting_pid = 0
                 try:
                     pid_val = ctypes.wintypes.ULONG()
-                    ctypes.windll.kernel32.GetNamedPipeClientProcessId(
+                    _k32.GetNamedPipeClientProcessId(
                         pipe, ctypes.byref(pid_val)
                     )
                     connecting_pid = pid_val.value
@@ -539,12 +578,12 @@ class MainWindow(FramelessMainWindow):
                             response = {"success": False, "error": "Unbekannte Aktion."}
                         res = json.dumps(response).encode('utf-8')
                         written = ctypes.wintypes.DWORD()
-                        ctypes.windll.kernel32.WriteFile(pipe, res, len(res), ctypes.byref(written), None)
-                        ctypes.windll.kernel32.FlushFileBuffers(pipe)
+                        _k32.WriteFile(pipe, res, len(res), ctypes.byref(written), None)
+                        _k32.FlushFileBuffers(pipe)
                     except Exception as e:
                         logger.error(f"IPC Request Fehler: {e}")
-                ctypes.windll.kernel32.DisconnectNamedPipe(pipe)
-                ctypes.windll.kernel32.CloseHandle(pipe)
+                _k32.DisconnectNamedPipe(pipe)
+                _k32.CloseHandle(pipe)
             except Exception as e:
                 logger.error(f"IPC Listener Fehler: {e}")
                 time.sleep(1)
@@ -3198,21 +3237,14 @@ class MainWindow(FramelessMainWindow):
             self._sf_theme.setCurrentIndex(idx)
         self._sf_theme.currentIndexChanged.connect(self._sf_on_theme_changed)
 
-        # Theme action button: menu with import + open folder
+        # Theme action button: menu with import + open folder.
+        # Styling lives in the theme .qss files (selector: #themeMenuBtn).
+        # No inline setStyleSheet — that would override the app-level QSS.
         from PyQt6.QtWidgets import QToolButton, QMenu
-        _sf_theme_btn_style = (
-            "QToolButton { background-color: #0077b6; "
-            "border: 1px solid #005a8a; border-radius: 6px; "
-            "color: white; font-size: 15px; font-weight: bold; }"
-            "QToolButton:hover { background-color: #0088cc; "
-            "border-color: #0077b6; }"
-            "QToolButton:pressed { background-color: #005a8a; }"
-            "QToolButton::menu-indicator { image: none; }"
-        )
         self._sf_theme_menu_btn = QToolButton()
+        self._sf_theme_menu_btn.setObjectName("themeMenuBtn")
         self._sf_theme_menu_btn.setText("\u22ee")
         self._sf_theme_menu_btn.setFixedSize(36, 32)
-        self._sf_theme_menu_btn.setStyleSheet(_sf_theme_btn_style)
         self._sf_theme_menu_btn.setToolTip(tr("settings.theme.actions"))
         self._sf_theme_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         _sf_theme_menu = QMenu(self._sf_theme_menu_btn)
@@ -3298,40 +3330,28 @@ class MainWindow(FramelessMainWindow):
         self._sf_interval_unit.addItem(tr("settings.interval.minutes"), "m")
         self._sf_interval_unit.addItem(tr("settings.interval.hours"), "h")
         # Capsule-style stepper: [-] [value] [+]
+        # NOTE: All styling lives in the theme .qss files (selectors:
+        # #intervalStepper, #intervalMinusBtn, #intervalPlusBtn). We must
+        # NOT call setStyleSheet() here — inline widget QSS takes priority
+        # over the app-level theme QSS, so hardcoding colors would break
+        # dark mode. Theme switching works automatically because
+        # apply_theme() replaces the app stylesheet.
         self._sf_interval_stepper = QWidget()
         self._sf_interval_stepper.setObjectName("intervalStepper")
         self._sf_interval_stepper.setFixedHeight(32)
         _stepper_hl = QHBoxLayout(self._sf_interval_stepper)
         _stepper_hl.setContentsMargins(0, 0, 0, 0)
         _stepper_hl.setSpacing(0)
-        _stepper_btn_style = (
-            "QPushButton { background-color: #f0f0f0; border: none; "
-            "color: #555; font-size: 16px; font-weight: bold; }"
-            "QPushButton:hover { background-color: #e0e0e0; color: #0077b6; }"
-            "QPushButton:pressed { background-color: #d0d0d0; }"
-            "QPushButton#intervalMinusBtn { border-top-left-radius: 16px; "
-            "border-bottom-left-radius: 16px; }"
-            "QPushButton#intervalPlusBtn { border-top-right-radius: 16px; "
-            "border-bottom-right-radius: 16px; }"
-        )
         self._sf_interval_minus_btn = QPushButton("-")
         self._sf_interval_minus_btn.setObjectName("intervalMinusBtn")
         self._sf_interval_minus_btn.setFixedSize(36, 32)
-        self._sf_interval_minus_btn.setStyleSheet(_stepper_btn_style)
         self._sf_interval_minus_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._sf_interval_value = NoWheelSpinBox()
         self._sf_interval_value.setFixedWidth(60)
         self._sf_interval_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._sf_interval_value.setStyleSheet(
-            "QSpinBox { background-color: white; border: none; "
-            "color: #333; font-size: 14px; font-weight: bold; "
-            "padding: 0px; }"
-            "QSpinBox::up-button, QSpinBox::down-button { width: 0px; height: 0px; }"
-        )
         self._sf_interval_plus_btn = QPushButton("+")
         self._sf_interval_plus_btn.setObjectName("intervalPlusBtn")
         self._sf_interval_plus_btn.setFixedSize(36, 32)
-        self._sf_interval_plus_btn.setStyleSheet(_stepper_btn_style)
         self._sf_interval_plus_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         _stepper_hl.addWidget(self._sf_interval_minus_btn)
         _stepper_hl.addWidget(self._sf_interval_value)
@@ -5561,11 +5581,18 @@ class MainWindow(FramelessMainWindow):
             from src.terminal.bridge_server import TerminalBridgeServer
             self._bridge_server = TerminalBridgeServer()
             self._bridge_server.host_key_verify_callback = self._terminal_tofu_callback
-            self._bridge_server.start()
-
+            if not self._bridge_server.start():
+                # start() now surfaces failures (missing websockets, bind
+                # error, timeout) instead of silently leaving a broken
+                # half-initialised loop. Treat as unavailable: drop the
+                # instance so terminal UI falls back gracefully.
+                self._bridge_server = None
+                logger.warning("Terminal bridge server could not start (see prior log).")
+                return
             logger.debug("Terminal bridge server started on port %d", self._bridge_server.port)
         except Exception as e:
             logger.warning("Terminal bridge server could not start: %s", e)
+            self._bridge_server = None
 
     def _terminal_tofu_callback(self, host: str, port: int, fingerprint: str) -> bool:
         """Called from bridge_server thread when an unknown host key is encountered."""

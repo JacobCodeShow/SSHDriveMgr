@@ -315,6 +315,7 @@
   "status.saved": "Изменения сохранены.",
   "app.unexpected_error.title": "Непредвиденная ошибка",
   "app.unexpected_error.body": "Произошла непредвиденная ошибка.\nПриложение попытается продолжить работу.\n\nПодробности записаны в crash_report.txt.",
+  "app.unexpected_error.copy_details": "Копировать подробности",
   "main.mount_all": "Подключить все",
   "main.dismount_all": "Отключить все",
   "main.groups_filter": "Фильтр по группе",

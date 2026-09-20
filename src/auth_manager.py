@@ -311,35 +311,38 @@ class AuthManager:
 
         def _record_failure():
             """Zählt Fehlversuch; wirft LoginLockedError wenn Tier-Grenze getroffen.
-            FINDING-05: count and locked_until are written to DB for persistence."""
+            FINDING-05: count and locked_until are written to DB for persistence.
+            Returns (lockout_seconds, current_count) so the caller doesn't
+            have to re-read _login_attempts outside the lock (CWE-362)."""
             with _LOGIN_LOCK:
                 a = _login_attempts.get(key, {"count": 0, "locked_until": 0.0})
                 a["count"] += 1
-                lockout = _lockout_for_count(a["count"])
+                count = a["count"]
+                lockout = _lockout_for_count(count)
                 if lockout > 0:
                     a["locked_until"] = time.time() + lockout  # wall-clock for DB persistence
                     logger.warning(
                         f"Login für '{username}' gesperrt für {lockout}s "
-                        f"(Versuch #{a['count']})"
+                        f"(Versuch #{count})"
                     )
                 _login_attempts[key] = a
                 # SECURITY FIX (FINDING-05): persist to DB so process restart
                 # cannot reset the counter and bypass brute-force protection.
                 _persist_login_attempt(key, a)
-                return lockout
+                return lockout, count
 
         if not row:
-            lockout = _record_failure()
+            lockout, count = _record_failure()
             logger.warning(f"Login fehlgeschlagen: Benutzer '{username}' nicht gefunden.")
             if lockout:
-                raise LoginLockedError(lockout, _login_attempts[key]["count"])
+                raise LoginLockedError(lockout, count)
             return None
 
         if not verify_password(password, row["pw_hash"], row["pw_salt"]):
-            lockout = _record_failure()
+            lockout, count = _record_failure()
             logger.warning(f"Login fehlgeschlagen: Falsches Passwort für '{username}'.")
             if lockout:
-                raise LoginLockedError(lockout, _login_attempts[key]["count"])
+                raise LoginLockedError(lockout, count)
             return None
 
         kdf = row["enc_key_kdf"] if "enc_key_kdf" in row.keys() else "pbkdf2"

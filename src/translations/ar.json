@@ -315,6 +315,7 @@
   "status.saved": "تم حفظ التغييرات.",
   "app.unexpected_error.title": "خطأ غير متوقع",
   "app.unexpected_error.body": "حدث خطأ غير متوقع.\nسيحاول التطبيق متابعة العمل.\n\nتمت كتابة التفاصيل في crash_report.txt.",
+  "app.unexpected_error.copy_details": "نسخ التفاصيل",
   "main.mount_all": "وصل الكل",
   "main.dismount_all": "فصل الكل",
   "main.groups_filter": "تصفية حسب المجموعة",
