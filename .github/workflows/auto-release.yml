@@ -8,12 +8,31 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
     steps:
-      - name: Checkout code
+      - name: Checkout requested tag
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Validate tag and source version
+        shell: pwsh
+        run: |
+          $version = (Get-Content src/version.txt -Raw -Encoding UTF8).Trim()
+          if ($version -notmatch '^\d+\.\d+\.\d+$' -or $env:RELEASE_TAG -cne "v$version") { throw 'Tag does not match src/version.txt' }
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve checkout HEAD' }
+          $tagCommit = git rev-parse "refs/tags/$($env:RELEASE_TAG)^{commit}"
+          if ($LASTEXITCODE -ne 0 -or $head -ne $tagCommit) { throw 'Checkout is not the requested tag commit' }
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -25,117 +44,120 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw 'pip upgrade failed' }
+          python -m pip install -r requirements.txt pyinstaller pytest
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
 
       - name: Run tests
         shell: pwsh
-        run: python -m pytest tests -q
-
-      - name: Sync version
-        shell: powershell
-        run: .\scripts\sync_version.ps1
+        run: |
+          python -m pytest tests -q
+          if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
 
       - name: Build executables
-        shell: powershell
-        run: .\build_dual.ps1 -OneDir
-
-      - name: Verify build output
         shell: pwsh
-        run: |
-          Write-Host "=== dist/ contents ==="
-          Get-ChildItem dist -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.Name): $([math]::Round($_.Length/1MB, 2)) MB" }
-          if (-not (Test-Path dist/SSHDriveMgr.exe)) { throw "SSHDriveMgr.exe not found!" }
-          if (-not (Test-Path dist/SSHDriveMgr-cli.exe)) { throw "SSHDriveMgr-cli.exe not found!" }
-          if (-not (Test-Path dist/SSHDriveMgr-onedir/SSHDriveMgr.exe)) { throw "SSHDriveMgr-onedir not found!" }
-          Write-Host "Build output verified."
+        # Headless CI skips launch checks that require a visible Login window.
+        # pytest/version validation still run; local builds keep default startup checks.
+        run: .\build_dual.ps1 all -SkipStartupCheck
 
       - name: Package onedir build as zip
         shell: pwsh
         run: |
           $version = (Get-Content src/version.txt -Raw).Trim()
           $zip = "dist/SSHDriveMgr-onedir-$version.zip"
-          if (Test-Path $zip) { Remove-Item $zip -Force }
-          # -Path ".../*" zips the folder CONTENTS at the archive root, so
-          # extracting produces SSHDriveMgr.exe + _internal\ directly.
-          Compress-Archive -Path "dist/SSHDriveMgr-onedir/*" -DestinationPath $zip -CompressionLevel Optimal
-          $mb = [math]::Round((Get-Item $zip).Length/1MB, 1)
-          Write-Host "Created $zip ($mb MB)"
-          echo "ONEDIR_ZIP=$zip" >> $env:GITHUB_ENV
+          if (Test-Path -LiteralPath $zip) { throw "Unexpected stale archive: $zip" }
+          Compress-Archive -Path 'dist/SSHDriveMgr-onedir/*' -DestinationPath $zip -CompressionLevel Optimal
+          if ((Get-Item -LiteralPath $zip).Length -le 0) { throw 'Empty onedir archive' }
+          "ONEDIR_ZIP=$zip" >> $env:GITHUB_ENV
 
       - name: Install Inno Setup
         shell: pwsh
-        run: choco install innosetup -y
+        run: |
+          choco install innosetup -y
+          if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed' }
 
       - name: Build installer
         shell: pwsh
-        run: |
-          $iscc = Get-ChildItem "C:\Program Files*\Inno Setup 6\ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
-          if (-not $iscc) { $iscc = Get-Command ISCC.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source }
-          if (-not $iscc) { throw "ISCC.exe not found" }
-          Write-Host "Using ISCC: $iscc"
-          Write-Host "=== Running ISCC ==="
-          & $iscc ".\installer\SSHDriveMgr.iss" 2>&1 | Tee-Object -FilePath iscc_log.txt
-          $exitCode = $LASTEXITCODE
-          Write-Host "=== ISCC exit code: $exitCode ==="
-          if ($exitCode -ne 0) {
-            Write-Host "=== ISCC full log ==="
-            Get-Content iscc_log.txt -ErrorAction SilentlyContinue
-            throw "ISCC failed with exit code $exitCode"
-          }
-          Write-Host "=== Installer output ==="
-          Get-ChildItem dist_installer -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.Name): $([math]::Round($_.Length/1MB, 2)) MB" }
+        run: .\installer\build_installer.ps1 -SkipBuild
 
-      - name: Generate sha256sums
+      - name: Validate embedded release versions and generate checksums
         shell: pwsh
         run: |
-          $installer = Get-ChildItem dist_installer\*.exe | Select-Object -First 1 -ExpandProperty FullName
-          $files = @('.\dist\SSHDriveMgr.exe', '.\dist\SSHDriveMgr-cli.exe', $env:ONEDIR_ZIP, $installer)
-          $lines = foreach ($f in $files) {
-            $h = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
-            "$h  $([System.IO.Path]::GetFileName($f))"
+          $version = (Get-Content src/version.txt -Raw -Encoding UTF8).Trim()
+          if ($env:RELEASE_TAG -cne "v$version") { throw 'Release tag/version changed during build' }
+          $installer = "dist_installer/SSHDriveMgr-Setup-$version.exe"
+          $executables = @('dist/SSHDriveMgr.exe', 'dist/SSHDriveMgr-cli.exe', 'dist/SSHDriveMgr-onedir/SSHDriveMgr.exe', $installer)
+          foreach ($file in $executables) {
+            $artifact = Get-Item -LiteralPath $file -ErrorAction Stop
+            if ($artifact.Length -le 0 -or $artifact.VersionInfo.ProductVersion -ne $version) { throw "Embedded version mismatch: $file" }
           }
-          $lines | Out-File -FilePath sha256sums.txt -Encoding ascii
-          Write-Host "=== sha256sums.txt ==="
-          Get-Content sha256sums.txt
+          @'
+          from pathlib import Path
+          from PyInstaller.archive.readers import CArchiveReader
+          expected = Path('src/version.txt').read_text(encoding='utf-8').strip()
+          for name in ('SSHDriveMgr.exe', 'SSHDriveMgr-cli.exe'):
+              archive = CArchiveReader(str(Path('dist') / name))
+              keys = [key for key in archive.toc if key.replace('\\', '/') == 'src/version.txt']
+              if len(keys) != 1 or archive.extract(keys[0]).decode('utf-8').strip() != expected:
+                  raise SystemExit(f'Embedded src/version.txt mismatch: {name}')
+          if Path('dist/SSHDriveMgr-onedir/_internal/src/version.txt').read_text(encoding='utf-8').strip() != expected:
+              raise SystemExit('Onedir embedded src/version.txt mismatch')
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Embedded source version validation failed' }
+          $files = @('dist/SSHDriveMgr.exe', 'dist/SSHDriveMgr-cli.exe', $env:ONEDIR_ZIP, $installer)
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $([System.IO.Path]::GetFileName($file))"
+          }
+          $lines | Set-Content -LiteralPath sha256sums.txt -Encoding ascii
 
-      - name: Create Release and upload assets
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-executables
+          path: |
+            dist/SSHDriveMgr.exe
+            dist/SSHDriveMgr-cli.exe
+            dist/SSHDriveMgr-onedir-*.zip
+            dist_installer/*.exe
+            sha256sums.txt
+          if-no-files-found: error
+
+      - name: Upload all assets to draft and publish only after verification
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "${{ github.ref_name }}"
-          $installer = Get-ChildItem dist_installer\*.exe | Select-Object -First 1 -ExpandProperty FullName
-
-          # Create release if not exists, otherwise get existing
-          $release = gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
-          if (-not $release) {
-            Write-Host "Creating release $tag..."
-            gh release create $tag --repo $env:GITHUB_REPOSITORY --title $tag --generate-notes
-          } else {
-            Write-Host "Release $tag already exists, uploading assets..."
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:RELEASE_TAG
+          $version = (Get-Content src/version.txt -Raw -Encoding UTF8).Trim()
+          if ($tag -cne "v$version") { throw 'Refusing to publish a mismatched version/tag' }
+          $draft = gh release view $tag --repo $env:GITHUB_REPOSITORY --json isDraft --jq .isDraft 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --repo $env:GITHUB_REPOSITORY --title $tag --generate-notes --draft --verify-tag
+            if ($LASTEXITCODE -ne 0) { throw 'Draft release creation failed' }
+          } elseif ($draft -ne 'true') {
+            throw 'Refusing to overwrite an already published release; use the manual workflow deliberately'
           }
-
-          # Upload assets one by one (more stable than bulk upload)
-          $assets = @(
-            @{ Path = ".\dist\SSHDriveMgr.exe"; Name = "SSHDriveMgr.exe" },
-            @{ Path = ".\dist\SSHDriveMgr-cli.exe"; Name = "SSHDriveMgr-cli.exe" },
-            @{ Path = $env:ONEDIR_ZIP; Name = (Split-Path $env:ONEDIR_ZIP -Leaf) },
-            @{ Path = $installer; Name = (Split-Path $installer -Leaf) },
-            @{ Path = ".\sha256sums.txt"; Name = "sha256sums.txt" }
-          )
-
+          $assets = @('dist/SSHDriveMgr.exe', 'dist/SSHDriveMgr-cli.exe', $env:ONEDIR_ZIP, "dist_installer/SSHDriveMgr-Setup-$version.exe", 'sha256sums.txt')
           foreach ($asset in $assets) {
-            Write-Host "Uploading $($asset.Name)..."
-            gh release upload $tag $asset.Path --repo $env:GITHUB_REPOSITORY --clobber
+            gh release upload $tag $asset --repo $env:GITHUB_REPOSITORY --clobber
             if ($LASTEXITCODE -ne 0) {
-              Write-Host "Retry uploading $($asset.Name)..."
               Start-Sleep -Seconds 5
-              gh release upload $tag $asset.Path --repo $env:GITHUB_REPOSITORY --clobber
+              gh release upload $tag $asset --repo $env:GITHUB_REPOSITORY --clobber
+              if ($LASTEXITCODE -ne 0) { throw "Asset upload failed after retry: $asset" }
             }
           }
-
-          Write-Host "All assets uploaded successfully."
-
-          # Ensure release is published (not draft)
-          Write-Host "Publishing release..."
+          # Verify actual remote bytes, including the checksum asset, before
+          # making the release visible to the updater's latest-release API.
+          $verifyDir = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString())
+          New-Item -ItemType Directory -Path $verifyDir | Out-Null
+          foreach ($asset in $assets) {
+            $name = Split-Path $asset -Leaf
+            gh release download $tag --repo $env:GITHUB_REPOSITORY --pattern $name --dir $verifyDir
+            if ($LASTEXITCODE -ne 0) { throw "Remote asset verification download failed: $name" }
+            $remoteHash = (Get-FileHash -LiteralPath (Join-Path $verifyDir $name) -Algorithm SHA256).Hash
+            if ($remoteHash -ne (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash) { throw "Remote asset hash mismatch: $name" }
+          }
           gh release edit $tag --repo $env:GITHUB_REPOSITORY --draft=false
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }

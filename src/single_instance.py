@@ -13,19 +13,74 @@
 import ctypes
 import ctypes.wintypes
 import sys
-import os
 
 # Must match the app's main window title (or a unique prefix of it)
 APP_WINDOW_TITLE = "SSH 磁盘管理器"
 
-try:
-    with open(os.path.join(os.path.dirname(__file__), "version.txt"), "r", encoding="utf-8") as f:
-        APP_VERSION = f.read().strip()
-except Exception:
-    APP_VERSION = "?"
+# The IPC pipe is version-independent and machine-wide. Use the same lifetime
+# boundary for all versions/sessions of a Windows user, never one global lock
+# shared by different users. Resolve the SID from the token, not environment
+# variables or the (possibly Administrators-group) default token owner.
+MUTEX_NAME = r"Global\SSHDriveMgr_SingleInstance_{A3F2B1C4-9E7D-4A8F-B3C2-1D5E6F7A8B9C}"
+_SYNCHRONIZE = 0x00100000
+_ERROR_ACCESS_DENIED = 5
+_ERROR_ALREADY_EXISTS = 183
 
-# Unique mutex name – use your app name + a GUID to avoid collisions
-MUTEX_NAME = f"SSHFSWinManager_SingleInstance_Mutex_v{APP_VERSION}{{A3F2B1C4-9E7D-4A8F-B3C2-1D5E6F7A8B9C}}"
+
+class _SECURITY_ATTRIBUTES(ctypes.Structure):
+    _fields_ = [("nLength", ctypes.wintypes.DWORD),
+                ("lpSecurityDescriptor", ctypes.wintypes.LPVOID),
+                ("bInheritHandle", ctypes.wintypes.BOOL)]
+
+
+def _current_user_sid() -> str:
+    import win32api
+    import win32security
+    token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), 0x0008)  # TOKEN_QUERY
+    try:
+        sid, _attributes = win32security.GetTokenInformation(token, win32security.TokenUser)
+        return win32security.ConvertSidToStringSid(sid)
+    finally:
+        token.Close()
+
+
+def _mutex_apis():
+    """Explicit pointer-sized HANDLE signatures, including on 64-bit Windows."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexExW.argtypes = [ctypes.POINTER(_SECURITY_ATTRIBUTES),
+                                      ctypes.wintypes.LPCWSTR, ctypes.wintypes.DWORD,
+                                      ctypes.wintypes.DWORD]
+    kernel32.CreateMutexExW.restype = ctypes.wintypes.HANDLE
+    kernel32.OpenMutexW.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.BOOL,
+                                  ctypes.wintypes.LPCWSTR]
+    kernel32.OpenMutexW.restype = ctypes.wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+    kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
+    kernel32.LocalFree.argtypes = [ctypes.wintypes.HLOCAL]
+    kernel32.LocalFree.restype = ctypes.wintypes.HLOCAL
+    return kernel32
+
+
+def _mutex_security(sid: str):
+    """Only this user may synchronize; no write, privileges, or low-IL label.
+
+    A medium mandatory label and SYNCHRONIZE-only opens work with either UAC
+    token. Default elevated DACLs/CreateMutexW's MUTEX_ALL_ACCESS do not.
+    """
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    convert = advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW
+    convert.argtypes = [ctypes.wintypes.LPCWSTR, ctypes.wintypes.DWORD,
+                        ctypes.POINTER(ctypes.wintypes.LPVOID),
+                        ctypes.POINTER(ctypes.wintypes.ULONG)]
+    convert.restype = ctypes.wintypes.BOOL
+    descriptor = ctypes.wintypes.LPVOID()
+    sddl = f"D:P(A;;0x00100000;;;{sid})S:(ML;;NW;;;ME)"
+    if not convert(sddl, 1, ctypes.byref(descriptor), None):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if not descriptor.value:
+        raise OSError("Mutex security descriptor is NULL")
+    attributes = _SECURITY_ATTRIBUTES(ctypes.sizeof(_SECURITY_ATTRIBUTES), descriptor, False)
+    return attributes, descriptor
 
 
 def _find_and_focus_existing_window() -> bool:
@@ -93,25 +148,41 @@ def ensure_single_instance() -> None:
       - Creates the mutex and returns normally
       - The mutex lives for the entire process lifetime
     """
-    kernel32 = ctypes.windll.kernel32
+    global _mutex_handle
+    if _mutex_handle:
+        return
+    kernel32 = _mutex_apis()
+    sid = _current_user_sid()
+    mutex_name = f"{MUTEX_NAME}_{sid}"
+    attributes, descriptor = _mutex_security(sid)
+    try:
+        # Do not request ownership or MUTEX_ALL_ACCESS: existence, not waiting
+        # or mutation, implements this lock. Both UAC tokens can open it.
+        ctypes.set_last_error(0)
+        mutex = kernel32.CreateMutexExW(ctypes.byref(attributes), mutex_name, 0, _SYNCHRONIZE)
+        last_error = ctypes.get_last_error()
+    finally:
+        kernel32.LocalFree(descriptor)
 
-    # Try to create the mutex
-    # If it already exists, GetLastError() returns ERROR_ALREADY_EXISTS (183)
-    mutex = kernel32.CreateMutexW(
-        None,       # default security
-        True,       # request initial ownership
-        MUTEX_NAME,
-    )
+    if not mutex:
+        if last_error != _ERROR_ACCESS_DENIED:
+            raise ctypes.WinError(last_error)
+        # An elevated/legacy mutex can deny creation's requested access. A
+        # read-only probe may prove existence; denial is NEVER proof of being
+        # the first instance. If the probe fails, fail closed with its error.
+        mutex = kernel32.OpenMutexW(_SYNCHRONIZE, False, mutex_name)
+        if not mutex:
+            raise ctypes.WinError(ctypes.get_last_error())
+        last_error = _ERROR_ALREADY_EXISTS
 
-    last_error = kernel32.GetLastError()
-    ERROR_ALREADY_EXISTS = 183
-
-    if last_error == ERROR_ALREADY_EXISTS:
+    if last_error == _ERROR_ALREADY_EXISTS:
+        if not kernel32.CloseHandle(mutex):
+            raise ctypes.WinError(ctypes.get_last_error())
+        # Across sessions Windows cannot focus a window on another desktop;
+        # still exit safely rather than start another shared IPC listener.
         _find_and_focus_existing_window()
         sys.exit(0)
 
-    # Store mutex handle in a module-level variable so it is NOT garbage-collected.
-    global _mutex_handle
     _mutex_handle = mutex
 
 # Module-level handle – must stay alive for the entire process lifetime
@@ -122,6 +193,7 @@ def release_instance_lock() -> None:
     """Release the mutex so a new instance can start (e.g. for restart)."""
     global _mutex_handle
     if _mutex_handle:
-        ctypes.windll.kernel32.ReleaseMutex(_mutex_handle)
-        ctypes.windll.kernel32.CloseHandle(_mutex_handle)
+        # No ReleaseMutex: the existence handle never owns the mutex.
+        if not _mutex_apis().CloseHandle(_mutex_handle):
+            raise ctypes.WinError(ctypes.get_last_error())
         _mutex_handle = None

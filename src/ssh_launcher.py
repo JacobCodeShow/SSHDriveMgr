@@ -138,7 +138,8 @@ def _send_cli_log(cli_key: str, entry: dict) -> None:
         import ctypes
         import ctypes.wintypes
 
-        pipe_name = r"\\.\pipe\SSHDriveMgr_IPC_v1"
+        from src.windows_identity import ipc_pipe_name
+        pipe_name = ipc_pipe_name()
         PIPE_READMODE_MESSAGE = 0x00000002
         kernel32 = ctypes.windll.kernel32
 
@@ -176,10 +177,15 @@ def launch_ssh_terminal(conn: Connection, settings: AppSettings) -> tuple[bool, 
     # Audit Log für Sicherheits-Tracking
     logger.info(f"Auth-Versuch: SSH-Terminal für {conn.name} (Methode: {conn.auth_method})")
     
-    if conn.auth_method == "key" and not conn.key_path:
-        return False, "Fehler: Passwortloser Login erfordert einen gültigen SSH-Key-Pfad."
+    use_putty = bool(getattr(settings, 'use_putty', False) and getattr(settings, 'putty_path', ''))
+    if conn.auth_method == "key":
+        key_path = (conn.putty_key_path or conn.key_path) if use_putty else conn.key_path
+        if not key_path:
+            return False, "A private key compatible with the selected SSH client is required."
+        if not use_putty and key_path.lower().endswith(".ppk"):
+            return False, "PuTTY .ppk keys require PuTTY. Select PuTTY or configure an OpenSSH private key."
 
-    if getattr(settings, 'use_putty', False) and getattr(settings, 'putty_path', ''):
+    if use_putty:
         return _launch_putty(conn, settings.putty_path, settings)
     else:
         return _launch_native_ssh(conn, settings)
@@ -261,6 +267,43 @@ def _launch_native_ssh(conn: Connection, settings: AppSettings | None = None) ->
         return True, ""
     except Exception as e:
         return False, str(e)
+
+
+def _drain_exec_channel(channel, write_stdout, write_stderr, timeout=None) -> int:
+    """Stream both SSH windows fairly, using at most 64 KiB per read.
+
+    Never wait for exit status before draining stderr: a remote command can fill
+    that window while stdout is empty. timeout is an optional overall deadline,
+    not an inactivity timeout. Callbacks own any (bounded) audit capture.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout if timeout is not None else None
+    while True:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("SSH command deadline exceeded")
+        received = False
+        if channel.recv_ready():
+            data = channel.recv(64 * 1024)
+            if data:
+                write_stdout(data)
+                received = True
+        if channel.recv_stderr_ready():
+            data = channel.recv_stderr(64 * 1024)
+            if data:
+                write_stderr(data)
+                received = True
+        if not channel.recv_ready() and not channel.recv_stderr_ready():
+            # Exit status and stream EOF are independent SSH messages. Status
+            # may precede the final output; EOF may precede the status. Wait for
+            # BOTH (or channel close), enforcing the deadline throughout.
+            if channel.closed or (channel.eof_received and channel.exit_status_ready()):
+                # EOF/close may have arrived just after the readiness checks.
+                if channel.recv_ready() or channel.recv_stderr_ready():
+                    continue
+                return channel.recv_exit_status()
+        if not received:
+            time.sleep(0.01)
 
 
 def launch_ssh_in_current_terminal(conn_data: dict, exec_command: str = None, cli_key: str = None) -> int:
@@ -437,8 +480,17 @@ def launch_ssh_in_current_terminal(conn_data: dict, exec_command: str = None, cl
     # ── Non-interaktiver Modus: einzelnen Befehl ausführen und beenden ──
     if exec_command:
         rc = 1
-        out = b""
-        err = b""
+        out = bytearray()
+        err = bytearray()
+        capture_truncated = False
+
+        def _capture_and_write(target, writer, data):
+            nonlocal capture_truncated
+            writer(data)  # Output is never capped; only the audit copy is.
+            room = max(0, _CLI_LOG_MAX_BYTES - len(target))
+            target.extend(data[:room])
+            capture_truncated |= len(data) > room
+
         error_text = ""
         started_at = _now_iso()
         # Kein festes Zeitlimit mehr: 30 s reichten für nichts Ernsthaftes
@@ -447,20 +499,21 @@ def launch_ssh_in_current_terminal(conn_data: dict, exec_command: str = None, cl
         # Wer eine will, setzt NEOSSH_EXEC_TIMEOUT in Sekunden.
         _t = os.environ.get("NEOSSH_EXEC_TIMEOUT", "").strip()
         try:
+            import math
             exec_timeout = float(_t) if _t else None
+            if exec_timeout is not None and (exec_timeout <= 0 or not math.isfinite(exec_timeout)):
+                exec_timeout = None
         except ValueError:
             exec_timeout = None
         try:
             stdin_, stdout_, stderr_ = client.exec_command(exec_command, timeout=exec_timeout)
-            out = stdout_.read()
-            err = stderr_.read()
-            # Exit-Code des entfernten Kommandos durchreichen, damit Skripte
-            # darauf prüfen können.
-            rc = stdout_.channel.recv_exit_status()
-            if out:
-                _write_stdout(out)
-            if err:
-                _write_stderr(err)
+            stdin_.close()
+            rc = _drain_exec_channel(
+                stdout_.channel,
+                lambda data: _capture_and_write(out, _write_stdout, data),
+                lambda data: _capture_and_write(err, _write_stderr, data),
+                timeout=exec_timeout,
+            )
         except Exception as e:
             # socket.timeout & Co. haben oft einen leeren str(e) — dann bliebe
             # nur "Fehler beim Ausführen des Befehls:" ohne jeden Hinweis.
@@ -487,7 +540,7 @@ def launch_ssh_in_current_terminal(conn_data: dict, exec_command: str = None, cl
                 "exit_code": rc,
                 "started_at": started_at,
                 "ended_at": _now_iso(),
-                "truncated": was_truncated,
+                "truncated": capture_truncated or was_truncated,
             })
         return rc
 

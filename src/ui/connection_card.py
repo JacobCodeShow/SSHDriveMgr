@@ -37,14 +37,14 @@ class ConnectionCard(QFrame):
         self._is_ftp = bool(getattr(conn, "is_ftp", False))
         self.setObjectName("connectionCard")
         # Increase height when groups are present
-        self.setFixedHeight(68)
+        self.setFixedHeight(76)
         self._build_ui()
         self.update_mount_state(mounted)
 
     def _build_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 0, 12, 0)
-        layout.setSpacing(10)
+        layout.setContentsMargins(14, 0, 14, 0)
+        layout.setSpacing(12)
         layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
         self._cloud_lbl = QLabel()
@@ -80,6 +80,7 @@ class ConnectionCard(QFrame):
 
         self._detail_lbl = QLabel()
         self._detail_lbl.setObjectName("connDetail")
+        self._detail_lbl.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
         self._detail_lbl.setWordWrap(False)
         self._detail_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self._update_detail_text()
@@ -151,14 +152,11 @@ class ConnectionCard(QFrame):
         self._drive_badge.setProperty("mounted", mounted)
         self._mount_btn.setProperty("mounted", mounted)
 
-        # Prefer per-connection custom icon, else default cloud
-        icon_name = getattr(self._conn, "icon_name", "")
-        if icon_name:
-            icon_color = "#00b4d8" if mounted else "#aab4c4"
-            self._cloud_lbl.setPixmap(svg_pixmap(icon_name, icon_color, 32))
-        else:
-            cloud_color = "#00b4d8" if mounted else "#6a7a8a"
-            self._cloud_lbl.setPixmap(svg_pixmap("cloud", cloud_color, 32))
+        # One semantic palette feeds custom and default connection icons.
+        colors = self._theme_colors()
+        icon_name = getattr(self._conn, "icon_name", "") or "cloud"
+        icon_color = colors["accent"] if mounted else colors["muted"]
+        self._cloud_lbl.setPixmap(svg_pixmap(icon_name, icon_color, 32))
 
         if mounted:
             self._cloud_lbl.setToolTip(tr("card.tooltip.open_path"))
@@ -166,38 +164,31 @@ class ConnectionCard(QFrame):
             self._drive_badge.setCursor(Qt.CursorShape.PointingHandCursor)
         else:
             self._cloud_lbl.setToolTip(tr("card.tooltip.mount_off"))
-            self._drive_badge.setToolTip("Click to choose drive letter (or Auto)")
+            self._drive_badge.setToolTip(tr("card.tooltip.drive_change"))
             self._drive_badge.setCursor(Qt.CursorShape.PointingHandCursor)
 
-        self._ssh_btn.setIcon(svg_icon("terminal", "#aab4c4", 16))
+        self._ssh_btn.setIcon(svg_icon("terminal", colors["muted"], 16))
         # In DEBUG mode editing is always allowed, so the edit button stays "active"
         # even while mounted.
         locked = mounted and not self._debug_edit
-        # Light theme: active icon must be darker (#4a5a6a) to be visible on a light
-        # background; disabled icon lighter (#b8c4cf). Dark theme keeps original values.
-        if self._theme == "light":
-            _edit_active   = "#4a5a6a"
-            _edit_disabled = "#b8c4cf"
-        else:
-            _edit_active   = "#aab4c4"
-            _edit_disabled = "#6a7a8a"
-        self._edit_btn.setIcon(svg_icon("edit", _edit_active if not locked else _edit_disabled, 15))
+        self._edit_btn.setIcon(svg_icon("edit", colors["muted"] if locked else colors["text"], 15))
         self._edit_btn.setToolTip(
             tr("card.tooltip.edit_locked") if locked else tr("card.tooltip.edit")
         )
 
         self._edit_btn.setCursor(Qt.CursorShape.ArrowCursor if locked else Qt.CursorShape.PointingHandCursor)
-        self._edit_btn.setStyleSheet("QPushButton#cardEditBtn:hover { border:  1px solid #243243; }" if locked else "QPushButton#cardEditBtn:hover { border: 1px solid #72add6; }")
-
         if self._loading:
             return
 
+        colors = self._theme_colors()
         if mounted:
-            self._mount_btn.setIcon(svg_icon("minus", "#00d464", 16))
+            self._mount_btn.setIcon(svg_icon("minus", colors["muted"], 16))
+            self._mount_btn.setProperty("btn_type", "danger")
             self._mount_btn.setText("")
             self._mount_btn.setToolTip(tr("card.tooltip.mount_on"))
         else:
-            self._mount_btn.setIcon(svg_icon("arrow-right", "#aab4c4", 16))
+            self._mount_btn.setIcon(svg_icon("arrow-right", colors["accent"], 16))
+            self._mount_btn.setProperty("btn_type", "primary")
             self._mount_btn.setText("")
             self._mount_btn.setToolTip(tr("card.tooltip.mount_off"))
 
@@ -211,31 +202,21 @@ class ConnectionCard(QFrame):
         """Card state for FTP/FTPS: no mount toggle, the button opens the browser."""
         self._mounted = False
         self.setProperty("mounted", False)
-        # Prefer per-connection custom icon, else default cloud
-        icon_name = getattr(self._conn, "icon_name", "")
-        if icon_name:
-            self._cloud_lbl.setPixmap(svg_pixmap(icon_name, "#aab4c4", 32))
-        else:
-            self._cloud_lbl.setPixmap(svg_pixmap("cloud", "#6a7a8a", 32))
+        colors = self._theme_colors()
+        icon_name = getattr(self._conn, "icon_name", "") or "cloud"
+        self._cloud_lbl.setPixmap(svg_pixmap(icon_name, colors["muted"], 32))
         self._cloud_lbl.setToolTip(self._browser_tooltip())
         self._drive_badge.setToolTip(self._browser_tooltip())
         self._drive_badge.setCursor(Qt.CursorShape.PointingHandCursor)
 
-        if self._theme == "light":
-            _edit_active = "#4a5a6a"
-        else:
-            _edit_active = "#aab4c4"
-        self._edit_btn.setIcon(svg_icon("edit", _edit_active, 15))
+        self._edit_btn.setIcon(svg_icon("edit", colors["text"], 15))
         self._edit_btn.setToolTip(tr("card.tooltip.edit"))
         self._edit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._edit_btn.setStyleSheet(
-            "QPushButton#cardEditBtn:hover { border: 1px solid #72add6; }"
-        )
-
         if self._loading:
             return
 
-        self._mount_btn.setIcon(svg_icon("folder", "#aab4c4", 16))
+        self._mount_btn.setIcon(svg_icon("folder", colors["accent"], 16))
+        self._mount_btn.setProperty("btn_type", "primary")
         self._mount_btn.setText("")
         self._mount_btn.setToolTip(self._browser_tooltip())
 
@@ -287,6 +268,15 @@ class ConnectionCard(QFrame):
         
         return widget
 
+    def set_theme(self, theme: str) -> None:
+        self._theme = theme
+        self.update_mount_state(self._mounted)
+        self.set_terminal_active(self._ssh_btn.property("terminal_active") == "true")
+
+    def _theme_colors(self) -> dict:
+        from src.theme_manager import get_theme_manager
+        return get_theme_manager().get_colors(self._theme)
+
     def update_connection(self, conn: Connection):
         self._conn = conn
         self._is_ftp = bool(getattr(conn, "is_ftp", False))
@@ -303,10 +293,8 @@ class ConnectionCard(QFrame):
 
     def set_terminal_active(self, active: bool):
         """Highlight the SSH button when an integrated terminal session is alive."""
-        if active:
-            color = "#0077b6"
-        else:
-            color = "#aab4c4"
+        colors = self._theme_colors()
+        color = colors["accent"] if active else colors["muted"]
         self._ssh_btn.setIcon(svg_icon("terminal", color, 16))
         self._ssh_btn.setProperty("terminal_active", "true" if active else "false")
         self._ssh_btn.style().unpolish(self._ssh_btn)

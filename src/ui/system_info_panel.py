@@ -3,12 +3,13 @@ system_info_panel.py – System info panel for right panel.
 Displays SSH-gathered stats in a layout matching the app design.
 """
 
+from PyQt6 import sip
 from PyQt6.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QProgressBar, QWidget, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize
-from src.ui.icons import icon as svg_icon
+from src.ui.icons import icon as svg_icon, pixmap as svg_pixmap
 
 import subprocess
 import os
@@ -97,10 +98,8 @@ def _is_host_known(host: str, port: int, known_hosts_path: str) -> bool:
 
 
 def _ssh_host_key_check_option() -> str:
-    """
-    Use OpenSSH's TOFU mode so a first-time host can be added to known_hosts.
-    """
-    return "StrictHostKeyChecking=accept-new"
+    """Require a previously trusted host key; never auto-trust first contact."""
+    return "StrictHostKeyChecking=yes"
 
 
 class SSHSystemInfoThread(QThread):
@@ -134,6 +133,9 @@ class SSHSystemInfoThread(QThread):
     def stop(self):
         self._stopped = True
 
+    def resume(self):
+        self._stopped = False
+
     def _validate_auth(self) -> None:
         """Raise AuthLevelError if neither key nor password is configured."""
         # Key is only "available" if auth_method is "key" AND key exists
@@ -154,10 +156,24 @@ class SSHSystemInfoThread(QThread):
 
         ssh_client, client_type = self._find_ssh_client()
         if not ssh_client:
-            info["error"] = "SSH client not found (ssh.exe or plink.exe)"
+            if client_type == "ppk_requires_plink":
+                info["error"] = (
+                    "This PuTTY .ppk key requires plink.exe. Install PuTTY or "
+                    "configure an OpenSSH-compatible private key."
+                )
+            else:
+                info["error"] = "SSH client not found (ssh.exe or plink.exe)"
             return info
 
         known_hosts_path = os.path.expanduser("~\\.ssh\\known_hosts")
+        if client_type == "ssh" and not _is_host_known(
+            self._conn.host, self._conn.port, known_hosts_path
+        ):
+            info["error"] = (
+                "SSH host key is not trusted yet. Verify and accept it first "
+                "from the terminal or SFTP connection."
+            )
+            return info
 
         # Build command based on client type
         if client_type == 'plink':
@@ -261,36 +277,52 @@ class SSHSystemInfoThread(QThread):
                 return p
         return shutil.which("plink")
 
+    def _native_ssh_key_path(self) -> str:
+        """Return a key path OpenSSH can read, never a PuTTY .ppk file."""
+        for path in (self._conn.key_path, self._conn.putty_key_path):
+            if path and not str(path).lower().endswith(".ppk"):
+                return str(path)
+        return ""
+
     def _find_ssh_client(self) -> tuple[str | None, str]:
-        """Find SSH client (ssh.exe or plink.exe) based on settings.
-        Returns (executable_path, client_type) where client_type is 'ssh' or 'plink'."""
+        """Find an SSH client compatible with the configured authentication key."""
         use_putty = getattr(self._settings, 'use_putty', False) if self._settings else False
         sec_level = int(getattr(self._settings, 'security_level', 0) or 0) if self._settings else 0
-        # Key is only "available" if auth_method is "key" AND key exists
-        has_key = self._conn.auth_method == "key" and bool(self._conn.putty_key_path or self._conn.key_path)
+        key_auth = self._conn.auth_method == "key"
+        native_key_path = self._native_ssh_key_path()
+        key_paths = (self._conn.putty_key_path, self._conn.key_path)
+        ppk_path = next(
+            (str(path) for path in key_paths if path and str(path).lower().endswith(".ppk")),
+            "",
+        )
+
+        # A PPK-only connection must use plink even when PuTTY is not preferred;
+        # native OpenSSH cannot read PPK files. Never silently fall back to password auth.
+        if key_auth and not native_key_path and ppk_path:
+            plink_exe = self._find_plink()
+            if plink_exe:
+                return plink_exe, "plink"
+            return None, "ppk_requires_plink"
 
         # Password-only connections at level 2 always use native ssh.exe + SSH_ASKPASS,
         # even when PuTTY is active — plink's -pw flag exposes the password in the process list.
-        is_password_only = self._conn.auth_method == "password" and not has_key
+        is_password_only = self._conn.auth_method == "password" and not key_auth
 
         if use_putty and not (is_password_only and sec_level >= 2):
-            # Use plink for key-based auth when PuTTY is active
             key_to_use = self._conn.putty_key_path or self._conn.key_path
-
-            # Check if key is .ppk format (required by plink)
-            if key_to_use and not key_to_use.lower().endswith('.ppk'):
-                logger.warning(f"plink requires .ppk format keys, but '{key_to_use}' is not .ppk. Falling back to ssh.exe.")
-                # Fallback to ssh.exe for non-.ppk keys
+            if key_to_use and not str(key_to_use).lower().endswith('.ppk'):
+                logger.warning(
+                    "plink requires .ppk format keys, but '%s' is not .ppk. Falling back to ssh.exe.",
+                    key_to_use,
+                )
             else:
                 plink_exe = self._find_plink()
                 if plink_exe:
                     return plink_exe, 'plink'
-                # Fallback to ssh.exe if plink not found
 
         ssh_exe = self._find_ssh()
         if ssh_exe:
             return ssh_exe, 'ssh'
-
         return None, 'none'
 
     def _find_ssh(self) -> str | None:
@@ -307,8 +339,9 @@ class SSHSystemInfoThread(QThread):
         """Build SSH command for native ssh.exe. Password auth uses SSH_ASKPASS from _get_ssh_env().
         SECURITY FIX (FINDING-02): Uses StrictHostKeyChecking=yes (not accept-new) because
         _gather_info() already verified the host is present in known_hosts."""
-        # Key is only "available" if auth_method is "key" AND key exists
-        has_key = self._conn.auth_method == "key" and bool(self._conn.key_path)
+        # Native OpenSSH can use OpenSSH-compatible keys, but not PuTTY .ppk files.
+        native_key_path = self._native_ssh_key_path()
+        has_key = self._conn.auth_method == "key" and bool(native_key_path)
         known_hosts_path = os.path.expanduser("~\\.ssh\\known_hosts")
 
         if has_key:
@@ -335,7 +368,7 @@ class SSHSystemInfoThread(QThread):
         cmd_base.extend(["-p", str(self._conn.port)])
 
         if has_key:
-            cmd_base.extend(["-i", self._conn.key_path])
+            cmd_base.extend(["-i", native_key_path])
 
         target = f"{self._conn.user}@{self._conn.host}"
         return cmd_base, target
@@ -411,6 +444,10 @@ class SystemInfoPanel(QFrame):
         self._conn = conn
         self._settings = settings
         self._info_thread: SSHSystemInfoThread | None = None
+        self._background_stopped = False
+        self._resume_timer = QTimer(self)
+        self._resume_timer.setInterval(50)
+        self._resume_timer.timeout.connect(self._resume_pending_refresh)
         self._loading_anim_timer: QTimer | None = None
         self._loading_anim_phase: int = 0
 
@@ -448,19 +485,21 @@ class SystemInfoPanel(QFrame):
         title_col.addWidget(self._hero_title)
         self._hero_meta = QLabel(f"{self._conn.user}@{self._conn.host}:{self._conn.port}")
         self._hero_meta.setObjectName("sysinfoHeroMeta")
+        self._hero_meta.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
         title_col.addWidget(self._hero_meta)
         hero_top.addLayout(title_col)
         hero_top.addStretch()
 
-        self._state_pill = QLabel(tr("panel.status.connected"))
+        self._state_pill = QLabel(tr("sysinfo.loading"))
         self._state_pill.setObjectName("sysinfoStatePill")
-        self._state_pill.setProperty("connected", "true")
+        self._state_pill.setProperty("connected", "checking")
         hero_top.addWidget(self._state_pill, 0, Qt.AlignmentFlag.AlignTop)
 
         self._refresh_btn = QPushButton()
         self._refresh_btn.setObjectName("rpHeaderBtn")
         self._refresh_btn.setFixedSize(28, 28)
-        self._refresh_btn.setIcon(svg_icon("refresh", "#aab4c4", 15))
+        from src.theme_manager import get_theme_manager
+        self._refresh_btn.setIcon(svg_icon("refresh", get_theme_manager().get_colors()["muted"], 15))
         self._refresh_btn.setIconSize(QSize(15, 15))
         self._refresh_btn.setToolTip(tr("sysinfo.refresh"))
         self._refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -470,6 +509,7 @@ class SystemInfoPanel(QFrame):
 
         self._hero_path = QLabel(f"{self._conn.remote_path}  ->  {self._conn.drive_letter}")
         self._hero_path.setObjectName("dialogLead")
+        self._hero_path.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
         self._hero_path.setWordWrap(True)
         hero_l.addWidget(self._hero_path)
         root.addWidget(hero)
@@ -574,7 +614,8 @@ class SystemInfoPanel(QFrame):
         loading_l.setContentsMargins(18, 16, 18, 16)
         loading_l.setSpacing(8)
 
-        self._loading_icon = QLabel("⏳")
+        self._loading_icon = QLabel()
+        self._loading_icon_name = "server"
         self._loading_icon.setObjectName("sysinfoLoadingIcon")
         self._loading_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         loading_l.addWidget(self._loading_icon)
@@ -607,11 +648,19 @@ class SystemInfoPanel(QFrame):
         dots = "." * self._loading_anim_phase
         self._loading_dots.setText(dots if dots else " ")
 
+    def _apply_loading_icon(self):
+        from src.theme_manager import get_theme_manager
+        colors = get_theme_manager().get_colors()
+        color = colors["accent"] if self._loading_icon_name in ("server", "key") else colors["muted"]
+        self._loading_icon.setText("")
+        self._loading_icon.setPixmap(svg_pixmap(self._loading_icon_name, color, 24))
+
     def _set_loading_overlay_visible(self, visible: bool):
         if not hasattr(self, "_loading_overlay"):
             return
         if visible:
-            self._loading_icon.setText("⏳")
+            self._loading_icon_name = "server"
+            self._apply_loading_icon()
             self._loading_title.setText(tr("sysinfo.loading"))
             self._loading_dots.setText("…")
             self._loading_dots.show()
@@ -627,7 +676,8 @@ class SystemInfoPanel(QFrame):
         if not hasattr(self, "_loading_overlay"):
             return
         self._loading_anim_timer.stop()
-        self._loading_icon.setText(icon)
+        self._loading_icon_name = icon
+        self._apply_loading_icon()
         self._loading_title.setText(title)
         self._loading_dots.setText(body)
         self._hero_card.hide()
@@ -694,7 +744,18 @@ class SystemInfoPanel(QFrame):
         bar.style().unpolish(bar)
         bar.style().polish(bar)
 
+    def set_theme(self, theme: str) -> None:
+        from src.theme_manager import get_theme_manager
+        colors = get_theme_manager().get_colors(theme)
+        self._refresh_btn.setIcon(svg_icon("refresh", colors["muted"], 15))
+        icon_color = colors["accent"] if self._loading_icon_name in ("server", "key") else colors["muted"]
+        self._loading_icon.setPixmap(svg_pixmap(self._loading_icon_name, icon_color, 24))
+
     def _fetch_info(self):
+        if self._background_stopped:
+            return
+        if self._info_thread and not self._info_thread.wait(0):
+            return
         self._hero_card.show()
         self._loading_lbl.show()
         self._state_card.show()
@@ -704,8 +765,8 @@ class SystemInfoPanel(QFrame):
         self._set_loading_overlay_visible(True)
 
         if self._info_thread:
-            self._info_thread.stop()
-            self._info_thread.wait()
+            self._info_thread.wait(0)
+            self._info_thread.deleteLater()
 
         self._info_thread = SSHSystemInfoThread(self._conn, settings=self._settings)
         self._info_thread.info_ready.connect(self._on_info_ready)
@@ -713,6 +774,8 @@ class SystemInfoPanel(QFrame):
         self._info_thread.start()
 
     def _on_info_ready(self, info: dict):
+        if self._background_stopped:
+            return
         self._loading_lbl.hide()
         self._state_card.hide()
         self._refresh_btn.setEnabled(True)
@@ -818,12 +881,18 @@ class SystemInfoPanel(QFrame):
         self._ip_row._value_lbl.setText(self._conn.host)
 
     def _on_error(self, msg: str, error_type: str = "generic"):
+        if self._background_stopped:
+            return
         self._set_loading_overlay_visible(False)
+        self._state_pill.setText(tr("panel.status.disconnected"))
+        self._state_pill.setProperty("connected", "false")
+        self._state_pill.style().unpolish(self._state_pill)
+        self._state_pill.style().polish(self._state_pill)
         if error_type == "auth_missing":
             self._loading_lbl.hide()
             self._state_card.hide()
             self._show_overlay_error(
-                "🔑",
+                "key",
                 tr("sysinfo.auth.missing.title"),
                 tr("sysinfo.auth.missing.desc"),
             )
@@ -833,7 +902,7 @@ class SystemInfoPanel(QFrame):
             self._loading_lbl.hide()
             self._state_card.hide()
             self._show_overlay_error(
-                "🤷",
+                "shield",
                 tr("sysinfo.key_missing.title"),
                 tr("sysinfo.key_missing.desc"),
             )
@@ -842,10 +911,6 @@ class SystemInfoPanel(QFrame):
         self._loading_lbl.hide()
         self._content.hide()
         self._state_card.show()
-        self._state_pill.setText(tr("dialog.error"))
-        self._state_pill.setProperty("connected", "false")
-        self._state_pill.style().unpolish(self._state_pill)
-        self._state_pill.style().polish(self._state_pill)
         self._error_lbl.setText(f"{tr('sysinfo.error')} {msg}")
         self._error_lbl.show()
         self._refresh_btn.setEnabled(True)
@@ -853,12 +918,43 @@ class SystemInfoPanel(QFrame):
     def _on_close(self):
         self.closed.emit()
 
-    def closeEvent(self, event):
+    def stop_background_work(self):
+        """Stop scheduling; return the thread so the owner can retain/drain it."""
+        self._background_stopped = True
+        self._resume_timer.stop()
         if self._refresh_timer:
             self._refresh_timer.stop()
+        if self._loading_anim_timer:
+            self._loading_anim_timer.stop()
+        if self._info_thread is not None and sip.isdeleted(self._info_thread):
+            self._info_thread = None
         if self._info_thread:
             self._info_thread.stop()
-            self._info_thread.wait()
-        if self._loading_anim_timer and self._loading_anim_timer.isActive():
-            self._loading_anim_timer.stop()
+        return self._info_thread
+
+    def resume_background_work(self):
+        self._background_stopped = False
+        self._refresh_timer.start()
+        self._resume_timer.start()
+        self._resume_pending_refresh()
+
+    def _resume_pending_refresh(self):
+        if self._background_stopped:
+            self._resume_timer.stop()
+            return
+        if self._info_thread is not None and sip.isdeleted(self._info_thread):
+            self._info_thread = None
+        if self._info_thread is not None and not self._info_thread.wait(0):
+            return
+        self._resume_timer.stop()
+        # A stopped one-shot worker may already have suppressed its result;
+        # always issue a fresh request rather than trying to revive that result.
+        self._fetch_info()
+
+    def closeEvent(self, event):
+        worker = self.stop_background_work()
+        if worker is not None and (worker.isRunning() or not worker.wait(0)):
+            event.ignore()
+            QTimer.singleShot(50, self.close)
+            return
         event.accept()

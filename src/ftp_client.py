@@ -30,6 +30,7 @@ import os
 import re
 import ssl
 import stat
+import tempfile
 import threading
 from datetime import datetime
 from typing import Callable, Optional
@@ -104,6 +105,8 @@ class FtpClient:
         Raises FtpClientError on any failure.
         """
         with self._lock:
+            self._invalidate_session()
+            self._connected = False
             self._conn = conn
             self._ftp = self._open_session(conn)
             self._connected = True
@@ -207,19 +210,25 @@ class FtpClient:
         except Exception:
             pass
 
+    def _invalidate_session(self) -> None:
+        """Discard the wire state, retaining the logical session and credentials.
+
+        Never issue QUIT/ABOR on a possibly desynchronized control channel:
+        leftover transfer replies could be mistaken for their responses.
+        Caller holds _lock.
+        """
+        ftp, self._ftp = self._ftp, None
+        self._quiet_close(ftp)
+
     def disconnect(self) -> None:
-        """Close the control connection. Safe to call multiple times."""
+        """Close explicitly; future operations must not reconnect automatically."""
         with self._lock:
-            ftp, self._ftp = self._ftp, None
             self._connected = False
-        if ftp is not None:
-            try:
-                ftp.quit()
-            except Exception:
-                self._quiet_close(ftp)
+            self._invalidate_session()
 
     @property
     def is_connected(self) -> bool:
+        """Non-blocking logical-session snapshot; a dropped wire may reconnect."""
         return self._connected
 
     # ── Directory operations ────────────────────────────────────────────────
@@ -272,8 +281,11 @@ class FtpClient:
                 ))
         except ftplib.error_perm:
             return None            # 500/502: MLSD unknown → caller falls back
-        except Exception as e:
-            raise FtpClientError(str(e)) from e
+        except BaseException as e:
+            self._invalidate_session()
+            if isinstance(e, Exception):
+                raise FtpClientError(str(e)) from e
+            raise
         return entries
 
     def _list_line_based(self, ftp: ftplib.FTP, path: str) -> list[SftpEntry]:
@@ -281,8 +293,11 @@ class FtpClient:
         lines: list[str] = []
         try:
             ftp.retrlines("LIST", lines.append)
-        except Exception as e:
-            raise FtpClientError(str(e)) from e
+        except BaseException as e:
+            self._invalidate_session()
+            if isinstance(e, Exception):
+                raise FtpClientError(str(e)) from e
+            raise
 
         entries: list[SftpEntry] = []
         for line in lines:
@@ -357,8 +372,16 @@ class FtpClient:
             path = _normalize(remote_path)
             total = self._size(ftp, path)
             done = 0
+            destination = os.path.abspath(local_path)
+            temp_path = None
             try:
-                with open(local_path, "wb") as fh:
+                fd, temp_path = tempfile.mkstemp(
+                    prefix=".neossh-download-",
+                    suffix=".part",
+                    dir=os.path.dirname(destination),
+                )
+                os.close(fd)
+                with open(temp_path, "wb") as fh:
                     def _write(block: bytes) -> None:
                         nonlocal done
                         fh.write(block)
@@ -367,12 +390,20 @@ class FtpClient:
                             progress_callback(done, total or done)
 
                     ftp.retrbinary(f"RETR {path}", _write, blocksize=_BLOCKSIZE)
-            except Exception as e:
-                try:
-                    os.remove(local_path)   # don't leave a truncated file behind
-                except OSError:
-                    pass
-                raise FtpClientError(str(e)) from e
+                os.replace(temp_path, destination)
+                temp_path = None
+            except BaseException as e:
+                # ftplib skips the final transfer response when a data callback
+                # fails. NOOP cannot resynchronize pending 226/426/ABOR replies.
+                self._invalidate_session()
+                if temp_path:
+                    try:
+                        os.remove(temp_path)
+                    except OSError:
+                        pass
+                if isinstance(e, Exception):
+                    raise FtpClientError(str(e)) from e
+                raise
 
     def upload(
         self,
@@ -406,8 +437,11 @@ class FtpClient:
                     ftp.storbinary(
                         f"STOR {path}", fh, blocksize=_BLOCKSIZE, callback=_sent
                     )
-            except Exception as e:
-                raise FtpClientError(str(e)) from e
+            except BaseException as e:
+                self._invalidate_session()
+                if isinstance(e, Exception):
+                    raise FtpClientError(str(e)) from e
+                raise
 
     @staticmethod
     def _size(ftp: ftplib.FTP, path: str) -> int:
@@ -425,24 +459,20 @@ class FtpClient:
         Idle FTP control connections are routinely closed by the server, which
         would otherwise surface as a confusing error on the next click.
         """
-        if not self._connected or self._ftp is None:
+        if not self._connected or self._conn is None:
             raise FtpClientError("Not connected to FTP server")
-        try:
-            self._ftp.voidcmd("NOOP")
-            return self._ftp
-        except Exception:
-            logger.debug("FtpClient: control connection lost, reconnecting")
+        if self._ftp is not None:
+            try:
+                self._ftp.voidcmd("NOOP")
+                return self._ftp
+            except Exception:
+                logger.debug("FtpClient: control connection lost, reconnecting")
+                self._invalidate_session()
 
-        self._quiet_close(self._ftp)
-        self._ftp = None
-        if self._conn is None:
-            self._connected = False
-            raise FtpClientError("Not connected to FTP server")
-        try:
-            self._ftp = self._open_session(self._conn)
-        except FtpClientError:
-            self._connected = False
-            raise
+        # _connected represents explicit user intent, not socket health. A
+        # failed reconnect retains that intent and the saved connection so a
+        # later operation can retry; disconnect() alone ends the session.
+        self._ftp = self._open_session(self._conn)
         return self._ftp
 
 

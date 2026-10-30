@@ -1,4 +1,4 @@
-﻿"""
+"""
 titlebar_theme.py – Colour palettes for the custom window titlebar.
 
 Provides two frozen dataclasses (DARK_PALETTE, LIGHT_PALETTE) and a
@@ -54,6 +54,27 @@ LIGHT_PALETTE = TitlebarPalette(
 )
 
 
+def _blend(first: str, second: str, weight: float) -> str:
+    channels = [round(int(first[i:i + 2], 16) * (1 - weight)
+                      + int(second[i:i + 2], 16) * weight) for i in (1, 3, 5)]
+    return "#%02x%02x%02x" % tuple(channels)
+
+
 def get_palette(theme: str) -> TitlebarPalette:
-    """Return the palette for *theme* ('dark' or 'light')."""
-    return LIGHT_PALETTE if theme == "light" else DARK_PALETTE
+    """Resolve builtin/user themes through the Qt-free semantic tokens."""
+    from src.theme_manager import get_theme_manager
+
+    colors = get_theme_manager().get_colors(theme)
+    base = DARK_PALETTE if colors["is_dark"] else LIGHT_PALETTE
+    return TitlebarPalette(
+        bg=colors["background"],
+        bg_hover=_blend(colors["background"], colors["text"], .10),
+        bg_pressed=_blend(colors["background"], colors["text"], .18),
+        close_hover=base.close_hover,
+        close_pressed=base.close_pressed,
+        text=colors["text"],
+        text_dim=colors["muted"],
+        icon=colors["muted"],
+        icon_hover=colors["text"],
+        border=colors["border"],
+    )

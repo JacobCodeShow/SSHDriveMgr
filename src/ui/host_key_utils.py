@@ -2,9 +2,8 @@
 host_key_utils.py – SSH host-key verification helpers shared by the terminal bridge
 and the SFTP browser.
 
-Provides TOFU (Trust On First Use) utilities that check known_hosts, fetch server
-fingerprints via ssh-keyscan, and implement a paramiko missing-host-key policy
-that saves accepted keys to disk.
+Provides TOFU (Trust On First Use) utilities that check known_hosts and ask
+about the exact key presented during Paramiko's SSH handshake before saving it.
 """
 
 from __future__ import annotations
@@ -12,6 +11,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from typing import Callable
 
 
 def is_host_known(host: str, port: int, known_hosts_path: str) -> bool:
@@ -94,15 +94,33 @@ def get_server_fingerprint(host: str, port: int) -> str | None:
 
 
 class TOFUAcceptPolicy:
-    """Paramiko missing-host-key policy that saves accepted keys to known_hosts."""
+    """Ask about and save the exact host key presented by the SSH handshake."""
 
-    def __init__(self, known_hosts_path: str) -> None:
+    def __init__(
+        self,
+        known_hosts_path: str,
+        host: str,
+        port: int,
+        confirm_callback: Callable[[str, int, str], bool],
+    ) -> None:
         self._path = known_hosts_path
+        self._host = host
+        self._port = port
+        self._confirm_callback = confirm_callback
 
     def missing_host_key(self, client, hostname: str, key) -> None:
         import base64
+        import hashlib
+        from paramiko.ssh_exception import SSHException
+
+        fingerprint = "SHA256:" + base64.b64encode(
+            hashlib.sha256(key.asbytes()).digest()
+        ).decode("ascii").rstrip("=")
+        if not self._confirm_callback(self._host, self._port, fingerprint):
+            raise SSHException("SSH host key was rejected by the user")
+
         key_type = key.get_name()
-        key_b64 = base64.b64encode(key.asbytes()).decode()
+        key_b64 = base64.b64encode(key.asbytes()).decode("ascii")
         entry = f"{hostname} {key_type} {key_b64}\n"
         os.makedirs(os.path.dirname(self._path), exist_ok=True)
         with open(self._path, "a", encoding="utf-8") as f:

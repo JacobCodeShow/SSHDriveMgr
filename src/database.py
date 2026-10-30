@@ -22,6 +22,8 @@ import stat
 import sys
 from pathlib import Path
 
+from src.crypto import upgrade_legacy_password_hash
+
 import logging
 _db_logger = logging.getLogger(__name__)
 
@@ -122,8 +124,38 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
+def _migrate_credential_verifiers(conn: sqlite3.Connection) -> int:
+    """Upgrade every raw PBKDF2 verifier atomically; return the number changed.
+
+    A savepoint works both inside init_db's transaction and on its own. Errors
+    propagate so startup cannot silently leave a partly migrated user table.
+    Salt, encrypted credentials and wrapping KDF are deliberately untouched:
+    Argon2 rewrapping requires the user's password at a successful login.
+    """
+    # Overwrite deleted cell content instead of leaving the old wrapping key in
+    # SQLite free space. Existing WAL/backup copies need separate cleanup.
+    conn.execute("PRAGMA secure_delete = ON")
+    conn.execute("SAVEPOINT credential_verifiers_v2")
+    try:
+        rows = conn.execute(
+            "SELECT id, pw_hash FROM users WHERE typeof(pw_hash) = 'text' "
+            "AND length(pw_hash) = 64 AND pw_hash NOT GLOB '*[^0-9A-Fa-f]*'"
+        ).fetchall()
+        for user_id, legacy_hash in rows:
+            conn.execute(
+                "UPDATE users SET pw_hash = ? WHERE id = ?",
+                (upgrade_legacy_password_hash(legacy_hash), user_id),
+            )
+    except BaseException:
+        conn.execute("ROLLBACK TO SAVEPOINT credential_verifiers_v2")
+        conn.execute("RELEASE SAVEPOINT credential_verifiers_v2")
+        raise
+    conn.execute("RELEASE SAVEPOINT credential_verifiers_v2")
+    return len(rows)
+
+
 def init_db() -> None:
-    """Erstellt alle Tabellen falls sie noch nicht existieren."""
+    """Create the schema and upgrade legacy login verifiers before use."""
     db_path = get_db_path()
     # Verzeichnis existiert immer (get_db_path() legt es an)
     _set_secure_permissions(db_path.parent)
@@ -133,7 +165,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS users (
                 id          TEXT PRIMARY KEY,
                 username    TEXT NOT NULL UNIQUE COLLATE NOCASE,
-                pw_hash     TEXT NOT NULL,   -- PBKDF2 hex
+                pw_hash     TEXT NOT NULL,   -- versioned, domain-separated login verifier
                 pw_salt     TEXT NOT NULL,   -- random salt hex
                 enc_key_enc TEXT NOT NULL,   -- AES-key verschlüsselt mit user-pw
                 enc_key_iv  TEXT NOT NULL,   -- IV für enc_key_enc
@@ -320,6 +352,26 @@ def init_db() -> None:
                 conn.execute("ALTER TABLE app_settings ADD COLUMN sshfs_disable_cache INTEGER DEFAULT 0")
         except Exception:
             pass
+
+        # Security migration must not be hidden by optional schema-migration
+        # exception handlers above. All legacy users, including inactive ones,
+        # are upgraded without needing their passwords.
+        migrated_verifiers = _migrate_credential_verifiers(conn)
+
+    if migrated_verifiers:
+        # Run only AFTER the migration commits. Best effort: another open DB
+        # reader may prevent WAL truncation; backup/snapshot copies and storage
+        # device remnants cannot be sanitized by SQLite cleanup.
+        try:
+            conn.execute("VACUUM")
+        except sqlite3.Error as exc:
+            _db_logger.warning("Credential migration: VACUUM cleanup failed: %s", exc)
+        try:
+            checkpoint = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if checkpoint and checkpoint[0]:
+                _db_logger.warning("Credential migration: WAL cleanup is busy; old WAL copies may remain")
+        except sqlite3.Error as exc:
+            _db_logger.warning("Credential migration: WAL cleanup failed: %s", exc)
 
     # SECURITY FIX (FINDING-08 – TOCTOU): DB file now guaranteed to exist
     # (sqlite3.connect inside get_connection() creates it if absent).

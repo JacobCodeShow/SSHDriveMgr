@@ -162,7 +162,16 @@ class LoginDialog(FramelessDialog):
         super().__init__(parent)
         self.setObjectName("dialogSurface")
         self.setWindowTitle(tr("login.title"))
-        self.setMinimumWidth(440)
+        screen = QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen else None
+        self._compact_layout = bool(available and (available.width() < 900 or available.height() < 640))
+        self.setMinimumSize(440 if self._compact_layout else 760,
+                            460 if self._compact_layout else 520)
+        if available:
+            width = min(980, max(self.minimumWidth(), int(available.width() * .78)))
+            height = min(680, max(self.minimumHeight(), int(available.height() * .76)))
+            self.resize(width, height)
+            self.move(available.center().x() - width // 2, available.center().y() - height // 2)
         self.setModal(True)
         for icon_file in ("app_icon.ico", "app_icon.png"):
             icon_path = self._resource_path(os.path.join("assets", icon_file))
@@ -198,69 +207,137 @@ class LoginDialog(FramelessDialog):
         return w
 
     def _build_ui(self):
-        layout = QVBoxLayout(self._fdlg_content)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(14)
+        root = QHBoxLayout(self._fdlg_content) if not self._compact_layout else QVBoxLayout(self._fdlg_content)
+        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(18)
 
-        hero = QFrame()
-        hero.setObjectName("dialogHeroCard")
-        hero_l = QVBoxLayout(hero)
-        hero_l.setContentsMargins(22, 22, 22, 22)
-        hero_l.setSpacing(10)
+        brand = self._build_brand_panel()
+        if self._compact_layout:
+            brand.setMaximumHeight(142)
+            root.addWidget(brand)
+        else:
+            brand.setFixedWidth(318)
+            root.addWidget(brand)
 
-        icon_lbl = QLabel()
-        icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        icon_lbl.setObjectName("dialogIconLarge")
-        try:
-            icon_path = self._resource_path(os.path.join("assets", "app_icon.png"))
-            if os.path.exists(icon_path):
-                from PyQt6.QtGui import QPixmap
-                pm = QPixmap(icon_path).scaled(
-                    64, 64,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation
-                )
-                icon_lbl.setPixmap(pm)
-            else:
-                icon_lbl.setText("🔐")
-        except Exception:
-            icon_lbl.setText("🔐")
-        hero_l.addWidget(icon_lbl)
-
-        title = QLabel("SSH 磁盘管理器")
-        title.setObjectName("dialogTitle")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hero_l.addWidget(title)
-
-        try:
-            with open(os.path.join(os.path.dirname(__file__), "..", "..", "version.txt"), "r", encoding="utf-8") as f:
-                APP_VERSION = f.read().strip()
-        except Exception:
-            APP_VERSION = "?"
-
-        ver_lbl = QLabel(f"v{APP_VERSION}")
-        ver_lbl.setObjectName("dialogPill")
-        ver_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hero_l.addWidget(ver_lbl, 0, Qt.AlignmentFlag.AlignCenter)
-
-        lead = QLabel(tr("login.create_first") if self._first_run else tr("login.please_sign_in"))
-        lead.setObjectName("dialogLead")
-        lead.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lead.setWordWrap(True)
-        hero_l.addWidget(lead)
-        layout.addWidget(hero)
+        content = QWidget()
+        content.setObjectName("loginFormSurface")
+        form_root = QVBoxLayout(content)
+        form_root.setContentsMargins(20 if not self._compact_layout else 8, 12, 20 if not self._compact_layout else 8, 12)
+        form_root.setSpacing(9)
+        heading = QLabel(tr("login.form.register") if self._first_run else tr("login.form.signin"))
+        heading.setObjectName("loginFormHeading")
+        heading.setWordWrap(True)
+        form_root.addWidget(heading)
+        caption = QLabel(tr("login.create_first") if self._first_run else tr("login.please_sign_in"))
+        caption.setObjectName("loginFormCaption")
+        caption.setWordWrap(True)
+        form_root.addWidget(caption)
+        form_root.addSpacing(8)
 
         form_card = QFrame()
-        form_card.setObjectName("dialogSectionCard")
-        form_l = QVBoxLayout(form_card)
-        form_l.setContentsMargins(22, 20, 22, 20)
-        form_l.setSpacing(10)
-
+        form_card.setObjectName("loginFormCard")
+        form_layout = QVBoxLayout(form_card)
+        form_layout.setContentsMargins(20, 20, 20, 20)
+        form_layout.setSpacing(12)
         if self._first_run:
-            self._build_register_form(form_l)
+            self._build_register_form(form_layout)
         else:
-            self._build_login_form(form_l)
-        layout.addWidget(form_card)
+            self._build_login_form(form_layout)
+        form_root.addWidget(form_card)
+        form_root.addStretch(1)
+        root.addWidget(content, stretch=1)
+
+    def _build_brand_panel(self) -> QFrame:
+        brand = QFrame()
+        brand.setObjectName("loginBrandPanel")
+        layout = QVBoxLayout(brand)
+        layout.setContentsMargins(26 if not self._compact_layout else 18, 24 if not self._compact_layout else 14,
+                                  26 if not self._compact_layout else 18, 22 if not self._compact_layout else 14)
+        layout.setSpacing(14)
+
+        identity = QWidget()
+        identity.setObjectName("loginBrandIdentity")
+        identity_layout = QHBoxLayout(identity) if self._compact_layout else QVBoxLayout(identity)
+        identity_layout.setContentsMargins(0, 0, 0, 0)
+        identity_layout.setSpacing(12 if self._compact_layout else 18)
+        icon_lbl = QLabel()
+        icon_lbl.setObjectName("loginBrandLogo")
+        icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_size = 42 if self._compact_layout else 62
+        icon_lbl.setFixedSize(icon_size, icon_size)
+        icon_path = self._resource_path(os.path.join("assets", "app_icon.png"))
+        if os.path.exists(icon_path):
+            from PyQt6.QtGui import QPixmap
+            pixmap = QPixmap(icon_path).scaled(
+                icon_size, icon_size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            icon_lbl.setPixmap(pixmap)
+        identity_layout.addWidget(icon_lbl, 0, Qt.AlignmentFlag.AlignLeft if self._compact_layout else Qt.AlignmentFlag.AlignTop)
+
+        copy = QWidget()
+        copy_layout = QVBoxLayout(copy)
+        copy_layout.setContentsMargins(0, 0, 0, 0)
+        copy_layout.setSpacing(7)
+        eyebrow = QLabel(tr("login.brand.eyebrow"))
+        eyebrow.setObjectName("loginBrandEyebrow")
+        copy_layout.addWidget(eyebrow)
+        title = QLabel(tr("app.title"))
+        title.setObjectName("loginBrandTitle")
+        title.setWordWrap(True)
+        copy_layout.addWidget(title)
+        tagline = QLabel(tr("login.brand.tagline"))
+        tagline.setObjectName("loginBrandTagline")
+        tagline.setWordWrap(True)
+        copy_layout.addWidget(tagline)
+        if self._compact_layout:
+            identity_layout.addWidget(copy, stretch=1)
+        else:
+            identity_layout.addWidget(copy)
+        layout.addWidget(identity)
+
+        try:
+            with open(os.path.join(os.path.dirname(__file__), "..", "..", "version.txt"), "r", encoding="utf-8") as stream:
+                version = stream.read().strip()
+        except Exception:
+            version = "?"
+        if not self._compact_layout:
+            layout.addSpacing(20)
+            layout.addWidget(self._brand_feature("shield", tr("login.brand.feature.credentials")))
+            layout.addWidget(self._brand_feature("server", tr("login.brand.feature.protocols")))
+            layout.addWidget(self._brand_feature("folder", tr("login.brand.feature.mounts")))
+            layout.addStretch(1)
+            trust = QLabel(tr("login.brand.trust"))
+            trust.setObjectName("loginTrustBadge")
+            trust.setWordWrap(True)
+            layout.addWidget(trust)
+        else:
+            layout.addStretch(1)
+        version_label = QLabel(f"v{version}")
+        version_label.setObjectName("loginVersion")
+        version_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(version_label, 0, Qt.AlignmentFlag.AlignLeft)
+        return brand
+
+    def _brand_feature(self, icon_name: str, text: str) -> QWidget:
+        row = QWidget()
+        row.setObjectName("loginFeatureRow")
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 8, 0, 8)
+        layout.setSpacing(11)
+        from src.ui.icons import pixmap as svg_pixmap
+        icon_label = QLabel()
+        icon_label.setObjectName("loginFeatureIcon")
+        from src.theme_manager import get_theme_manager
+        icon_label.setPixmap(svg_pixmap(icon_name, get_theme_manager().get_colors()["accent"], 17))
+        icon_label.setFixedSize(20, 20)
+        layout.addWidget(icon_label)
+        label = QLabel(text)
+        label.setObjectName("loginFeatureText")
+        label.setWordWrap(True)
+        layout.addWidget(label, stretch=1)
+        return row
 
     def _build_login_form(self, layout: QVBoxLayout):
         lbl_user = QLabel(tr("login.username"))
@@ -292,7 +369,7 @@ class LoginDialog(FramelessDialog):
         self._login_btn = QPushButton(tr("login.sign_in"))
         self._login_btn.setObjectName("primaryBtn")
         self._login_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._login_btn.setMinimumHeight(34)
+        self._login_btn.setMinimumHeight(44)
         self._login_btn.setEnabled(False)
         self._login_btn.clicked.connect(self._do_login)
         layout.addWidget(self._login_btn)
@@ -347,7 +424,7 @@ class LoginDialog(FramelessDialog):
         btn = QPushButton(tr("login.create_account"))
         btn.setObjectName("primaryBtn")
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setMinimumHeight(34)
+        btn.setMinimumHeight(44)
         btn.clicked.connect(self._do_register)
         layout.addWidget(btn)
 

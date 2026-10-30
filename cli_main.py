@@ -19,7 +19,8 @@ import ctypes.wintypes
 
 
 def _handle_cli_connect(key: str, exec_cmd: str = None) -> int:
-    pipe_name = r"\\.\pipe\SSHDriveMgr_IPC_v1"
+    from src.windows_identity import ipc_pipe_name
+    pipe_name = ipc_pipe_name()
     PIPE_READMODE_MESSAGE = 0x00000002
     kernel32 = ctypes.windll.kernel32
 

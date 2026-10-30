@@ -30,6 +30,9 @@ from __future__ import annotations
 import ctypes
 import os
 import sys
+import weakref
+
+from PyQt6 import sip
 
 from PyQt6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QApplication
@@ -38,6 +41,14 @@ from PyQt6.QtCore import Qt, QSize, pyqtSignal
 from PyQt6.QtGui import QCursor, QPixmap
 
 from src.ui.titlebar_theme import get_palette, TitlebarPalette
+from src.i18n import tr
+
+
+def _unsubscribe_theme_callback(_object, manager, callback_ref):
+    """Drop a dialog's weak theme callback after its Qt wrapper is destroyed."""
+    callback = callback_ref()
+    if callback is not None:
+        manager.unsubscribe(callback)
 
 
 # ── compact dialog titlebar ──────────────────────────────────────────────────
@@ -92,7 +103,7 @@ class _DialogTitleBar(QWidget):
             icon_name = "restore" if maximized else "maximize"
             self._max_btn.setIcon(svg_icon(icon_name, self._palette.icon, 13))
             self._max_btn.setIconSize(QSize(13, 13))
-            self._max_btn.setToolTip("Wiederherstellen" if maximized else "Maximieren")
+            self._max_btn.setToolTip(tr("window.restore") if maximized else tr("window.maximize"))
 
     # ── private ──────────────────────────────────────────────────────────────
 
@@ -126,7 +137,7 @@ class _DialogTitleBar(QWidget):
             self._max_btn.setFixedSize(40, self.HEIGHT)
             self._max_btn.setCursor(Qt.CursorShape.ArrowCursor)
             self._max_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            self._max_btn.setToolTip("Maximieren")
+            self._max_btn.setToolTip(tr("window.maximize"))
             self._max_btn.clicked.connect(self.maximize_requested)
             layout.addWidget(self._max_btn)
 
@@ -134,6 +145,7 @@ class _DialogTitleBar(QWidget):
         self._close_btn.setFixedSize(46, self.HEIGHT)
         self._close_btn.setCursor(Qt.CursorShape.ArrowCursor)
         self._close_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._close_btn.setToolTip(tr("window.close"))
         self._close_btn.clicked.connect(self.close_requested)
         layout.addWidget(self._close_btn)
 
@@ -267,7 +279,8 @@ class FramelessDialog(QDialog):
         super().__init__(parent)
 
         # Auto-detect theme from a FramelessMainWindow parent
-        theme = "dark"
+        from src.theme_manager import get_theme_manager
+        theme = get_theme_manager().current_theme
         try:
             from src.ui.frameless_window import FramelessMainWindow
             p = parent
@@ -309,6 +322,14 @@ class FramelessDialog(QDialog):
         outer.addWidget(self._fdlg_content, stretch=1)
 
         QDialog.setLayout(self, outer)
+        theme_manager = get_theme_manager()
+        theme_callback = self.set_dialog_theme
+        theme_manager.subscribe(theme_callback)
+        callback_ref = weakref.WeakMethod(theme_callback)
+        self.destroyed.connect(
+            lambda _object=None, manager=theme_manager, ref=callback_ref:
+                _unsubscribe_theme_callback(_object, manager, ref)
+        )
 
     # ── icon helper ──────────────────────────────────────────────────────────
 
@@ -352,6 +373,8 @@ class FramelessDialog(QDialog):
     # ── public API ───────────────────────────────────────────────────────────
 
     def set_dialog_theme(self, theme: str) -> None:
+        if sip.isdeleted(self) or sip.isdeleted(self._fdlg_titlebar):
+            return
         self._fdlg_theme = theme
         if self._fdlg_titlebar is not None:
             self._fdlg_titlebar.set_theme(theme)

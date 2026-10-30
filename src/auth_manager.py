@@ -345,6 +345,9 @@ class AuthManager:
                 raise LoginLockedError(lockout, count)
             return None
 
+        # pw_hash is only a login verifier (v2 after init_db). Historical
+        # wrapping still derives from the supplied password and original salt,
+        # never from that stored verifier; only a password permits rewrapping.
         kdf = row["enc_key_kdf"] if "enc_key_kdf" in row.keys() else "pbkdf2"
         try:
             enc_key = decrypt_key(
@@ -386,8 +389,8 @@ class AuthManager:
         # Erfolgreichen Login → Fehlversuchs-Zähler zurücksetzen (CWE-307)
         # FINDING-05: also clear from DB so persistent counter is removed.
         with _LOGIN_LOCK:
+            _clear_login_attempt_from_db(key)
             _login_attempts.pop(key, None)
-        _clear_login_attempt_from_db(key)
 
         return user
 
@@ -421,6 +424,12 @@ class AuthManager:
                    WHERE id=?""",
                 (new_hash, new_salt, new_enc_key_enc, new_enc_key_iv, user_id)
             )
+            # Invalidate the saved master password in the same transaction.
+            # Older databases may not have used the optional remember feature.
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='remembered_login'").fetchone():
+                saved = conn.execute("SELECT username FROM remembered_login WHERE id=1").fetchone()
+                if saved and saved["username"].strip().lower() == row["username"].strip().lower():
+                    conn.execute("DELETE FROM remembered_login WHERE id=1")
 
         # CWE-362: Atomares Update über Session.update_enc_key (thread-safe)
         Session.update_enc_key(user_id, enc_key)
@@ -433,8 +442,8 @@ class AuthManager:
         """
         Admin-Reset: generiert neues Passwort + neuen enc_key für den User.
         Da der alte enc_key ohne altes Passwort nicht entschlüsselt werden kann,
-        gehen vorhandene verschlüsselte SSH-Passwörter verloren. Diese Felder
-        werden geleert; Key-Auth-Verbindungen bleiben funktionsfähig.
+        werden alle davon abhängigen Verbindungen und CLI-Verläufe entfernt.
+        Der Aufrufer muss den Benutzer vorab auf diesen Datenverlust hinweisen.
 
         Returns das neue Klartext-Passwort oder None wenn der User nicht existiert.
         Raises PermissionError wenn der Aufrufer kein Admin ist.
@@ -447,29 +456,46 @@ class AuthManager:
         alphabet = string.ascii_letters + string.digits
         new_pw = ''.join(secrets.choice(alphabet) for _ in range(14))
 
-        with get_connection() as conn:
-            row = conn.execute(
-                "SELECT id FROM users WHERE id = ?", (user_id,)
-            ).fetchone()
-            if not row:
-                return None
+        # Serialize cache invalidation with login attempt updates. Commit the
+        # password, dependent-row deletion, saved-password and DB lockout cleanup
+        # together; only then change the cache (a rollback must leave it intact).
+        with _LOGIN_LOCK:
+            with get_connection() as conn:
+                row = conn.execute(
+                    "SELECT id, username FROM users WHERE id = ?", (user_id,)
+                ).fetchone()
+                if not row:
+                    return None
+                username_key = row["username"].strip().lower()
 
-            new_hash, new_salt = hash_password(new_pw)
-            new_enc_key = generate_enc_key()
-            new_enc_key_enc, new_enc_key_iv = encrypt_key(new_enc_key, new_pw, new_salt, kdf='argon2')
+                new_hash, new_salt = hash_password(new_pw)
+                new_enc_key = generate_enc_key()
+                new_enc_key_enc, new_enc_key_iv = encrypt_key(new_enc_key, new_pw, new_salt, kdf='argon2')
 
-            conn.execute(
-                """UPDATE users SET pw_hash=?, pw_salt=?, enc_key_enc=?, enc_key_iv=?, enc_key_kdf='argon2'
-                   WHERE id=?""",
-                (new_hash, new_salt, new_enc_key_enc, new_enc_key_iv, user_id)
-            )
-            # Alte verschlüsselte SSH-Passwörter sind unlesbar → leeren
-            conn.execute(
-                "UPDATE connections SET pw_enc='', pw_iv='' WHERE user_id=?",
-                (user_id,)
-            )
+                conn.execute(
+                    """UPDATE users SET pw_hash=?, pw_salt=?, enc_key_enc=?, enc_key_iv=?, enc_key_kdf='argon2'
+                       WHERE id=?""",
+                    (new_hash, new_salt, new_enc_key_enc, new_enc_key_iv, user_id)
+                )
+                # Preserve destructive reset semantics: old ciphertext cannot
+                # be recovered using the newly generated encryption key.
+                conn.execute("DELETE FROM cli_history WHERE user_id=?", (user_id,))
+                conn.execute("DELETE FROM active_mounts WHERE user_id=?", (user_id,))
+                conn.execute("DELETE FROM connections WHERE user_id=?", (user_id,))
+                conn.execute("DELETE FROM login_attempts WHERE username_key=?", (username_key,))
+                if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='remembered_login'").fetchone():
+                    saved = conn.execute("SELECT username FROM remembered_login WHERE id=1").fetchone()
+                    if saved and saved["username"].strip().lower() == username_key:
+                        conn.execute("DELETE FROM remembered_login WHERE id=1")
+            _login_attempts.pop(username_key, None)
 
-        logger.warning(f"Admin-Reset: Passwort für user_id={user_id} neu generiert, SSH-Passwörter gelöscht.")
+        # Falls der Admin sein eigenes Konto zurücksetzt, sofort auch den
+        # In-Memory-Schlüssel aktualisieren, damit keine weiteren Schreibvorgänge
+        # mit dem nun ungültigen Schlüssel erfolgen.
+        Session.update_enc_key(user_id, new_enc_key)
+        logger.warning(
+            f"Admin-Reset: user_id={user_id}; alle Verbindungen und CLI-Verläufe gelöscht."
+        )
         return new_pw
 
     @staticmethod
@@ -973,9 +999,10 @@ class UserConnectionManager:
     def duplicate(self, conn_id: str, new_name: str = None):
         """Duplicate a connection at the database level.
 
-        Copies all columns verbatim (including encrypted password and metadata),
-        assigns a new id, appends " (copy)" to the name, and puts it at the end
-        of the sort order. Returns the new Connection, or None if not found.
+        Preserves encrypted password/metadata and drive settings, assigns a new
+        id/name and puts it last. CLI access is disabled and its bearer secret,
+        ciphertext, IV and lookup hash are never inherited by the copy.
+        Returns the new Connection, or None if not found.
         """
         with get_connection() as conn:
             row = conn.execute(
@@ -988,6 +1015,10 @@ class UserConnectionManager:
             data = dict(row)
             new_id = str(uuid.uuid4())
             data["id"] = new_id
+            data["cli_access_enabled"] = 0
+            data["cli_access_key"] = None
+            data["cli_access_key_iv"] = None
+            data["cli_access_key_hash"] = None
 
             # Decrypt original name, then re-encrypt with (copy) suffix
             orig_name = self._dec_meta(row, "name_enc", "name_iv", "name")

@@ -8,7 +8,7 @@ Features:
 """
 
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
+    QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QComboBox, QSpinBox, QFrame, QFileDialog,
     QWidget, QCheckBox, QScrollArea
 )
@@ -21,13 +21,14 @@ import secrets
 from src.config import Connection, AppSettings
 from src.drive_utils import get_available_drives
 from src.ui.dialog_utils import match_parent_height, make_maximize_button
+from src.ui.frameless_dialog import FramelessDialog
 from src.ui.icons import icon as svg_icon
 from src.ui.widgets.no_wheel import NoWheelComboBox, NoWheelScrollArea, NoWheelSpinBox
 from src.i18n import tr
 from src.sshfs_controller import _is_safe_label
 
 
-class AddEditDialog(QDialog):
+class AddEditDialog(FramelessDialog):
 
     def __init__(
         self,
@@ -38,7 +39,7 @@ class AddEditDialog(QDialog):
         settings: AppSettings = None,
         templates: List[Connection] = None,
     ):
-        super().__init__(parent)
+        super().__init__(parent, show_maximize=True)
         self._connection = connection          # None = Add-Modus
         self._used_letters = used_letters or []
         self._existing = existing_connections or []
@@ -83,7 +84,7 @@ class AddEditDialog(QDialog):
 
     def _build_ui(self):
         # Äußeres Layout: Scroll-Area + fixe Button-Zeile
-        outer = QVBoxLayout(self)
+        outer = QVBoxLayout(self._fdlg_content)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 

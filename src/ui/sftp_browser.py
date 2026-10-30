@@ -12,14 +12,16 @@ Connection.protocol, everything above it (model, workers, UI) is shared.
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 import threading
+import time
 from datetime import datetime
 from typing import Any
 
 from PyQt6.QtCore import (
     QAbstractTableModel, QFileSystemWatcher, QModelIndex, QSize,
-    QSortFilterProxyModel, Qt, QTimer, pyqtSignal,
+    QSortFilterProxyModel, Qt, QThread, QTimer, pyqtSignal, pyqtSlot,
 )
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
@@ -30,6 +32,7 @@ from PyQt6.QtWidgets import (
 
 from src.app_logger import logger
 from src.config import Connection
+from src.local_paths import validate_remote_filename, confined_download_path
 from src.ftp_client import FtpClient
 from src.i18n import tr
 from src.sftp_client import SftpClient, SftpEntry
@@ -140,13 +143,10 @@ def _fmt_size(size: int) -> str:
 # ── Browser window ───────────────────────────────────────────────────────────
 
 class SftpBrowserWindow(FramelessDialog):
-    """
-    Non-modal SFTP/FTP file browser window.
+    """Non-modal SFTP/FTP browser with one instance per connection."""
 
-    Created by MainWindow._on_open_mounted_path() and shown with show().
-    One instance per connection; reopening an already-open browser raises
-    the existing window instead.
-    """
+    _tofu_requested = pyqtSignal(str, int, str, object)
+    shutdown_failed = pyqtSignal(str)
 
     def __init__(
         self,
@@ -155,6 +155,10 @@ class SftpBrowserWindow(FramelessDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent, show_maximize=True)
+        self._tofu_requested.connect(
+            self._dispatch_tofu_dialog,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._conn = conn
         self._theme = theme
         self._is_ftp = bool(getattr(conn, "is_ftp", False))
@@ -164,12 +168,34 @@ class SftpBrowserWindow(FramelessDialog):
         self._forward_stack: list[str] = []
         self._active_list_worker: SftpListWorker | None = None
         self._workers: list = []   # keep references so Qt doesn't GC running workers
+        self._pending_transfer_results = set()
+        self._worker_reaper_timer = QTimer(self)
+        self._worker_reaper_timer.setInterval(50)
+        self._worker_reaper_timer.timeout.connect(self._reap_stopped_workers)
         self._watcher = QFileSystemWatcher(self)
         self._watcher.fileChanged.connect(self._on_watched_file_changed)
         # local_path → remote_path for files currently open for editing
         self._edit_map: dict[str, str] = {}
         # Debounce: local_path → QTimer to avoid double-upload on save
         self._edit_timers: dict[str, QTimer] = {}
+        self._edit_generations: dict[str, int] = {}
+        self._edit_uploaded_versions: dict[str, tuple] = {}
+        self._edit_uploads: set[str] = set()
+        self._close_observed_versions: dict[str, tuple] = {}
+        self._close_last_change_at = time.monotonic()
+        self._disconnect_versions: dict[str, tuple] = {}
+        self._shutdown_recovery_reason = None
+        self._edit_reconnecting = False
+        self._edit_reconnect_failed = False
+        self._aborting_shutdown = False
+        self._close_requested = False
+        self._close_ready = False
+        self._close_wait_timer: QTimer | None = None
+        self._close_pending_edits: list[tuple[str, str]] = []
+        self._pending_tofu_requests = []
+        self._disconnect_thread = None
+        self._disconnect_done = threading.Event()
+        self._disconnect_error = None
 
         self.setWindowTitle(tr(
             "ftp.title" if self._is_ftp else "sftp.title",
@@ -318,23 +344,27 @@ class SftpBrowserWindow(FramelessDialog):
 
     # ── Theme ────────────────────────────────────────────────────────────────
 
+    def set_theme(self, theme: str) -> None:
+        self._theme = theme
+        self.set_dialog_theme(theme)
+        self._apply_theme_stylesheet()
+        from src.theme_manager import get_theme_manager
+        color = get_theme_manager().get_colors(theme)["muted"]
+        self._btn_refresh.setIcon(svg_icon("refresh", color, 15))
+        self._btn_upload.setIcon(svg_icon("plus", color, 15))
+        self._btn_mkdir.setIcon(svg_icon("folder", color, 15))
+
     def _apply_theme_stylesheet(self) -> None:
-        if self._theme == "dark":
-            bg       = "#0d0d12"
-            surface  = "#0D1117"
-            text     = "#c8d6e5"
-            accent   = "#0077b6"
-            border   = "#1a2535"
-            alt_row  = "#090910"
-            sep_col  = "#1e2a3a"
-        else:
-            bg       = "#f0f2f5"
-            surface  = "#ffffff"
-            text     = "#1a2332"
-            accent   = "#0077b6"
-            border   = "#dde2e8"
-            alt_row  = "#f8fafc"
-            sep_col  = "#dde2e8"
+        from src.theme_manager import get_theme_manager
+        colors = get_theme_manager().get_colors(self._theme)
+        bg = colors["background"]
+        surface = colors["surface"]
+        text = colors["text"]
+        accent = colors["accent"]
+        border = colors["border"]
+        muted = colors["muted"]
+        alt_row = bg
+        sep_col = border
 
         self._fdlg_content.setStyleSheet(f"""
             QWidget#sftpToolbar {{
@@ -349,8 +379,9 @@ class SftpBrowserWindow(FramelessDialog):
                 background-color: {surface};
                 color: {text};
                 border: 1px solid {border};
-                border-radius: 4px;
-                padding: 3px 8px;
+                border-radius: 8px;
+                padding: 6px 10px;
+                min-height: 22px;
                 font-size: 12px;
             }}
             QLineEdit#sftpPathEdit:focus {{
@@ -360,15 +391,16 @@ class SftpBrowserWindow(FramelessDialog):
                 background-color: {surface};
                 color: {text};
                 border: 1px solid {border};
-                border-radius: 4px;
+                border-radius: 8px;
                 font-size: 13px;
+                padding: 4px 8px;
             }}
             QPushButton#sftpNavBtn:hover, QPushButton#sftpActionBtn:hover {{
                 border-color: {accent};
             }}
             QPushButton#sftpNavBtn:disabled {{
-                color: {"#3a4a5a" if self._theme == "dark" else "#b0bbc8"};
-                border-color: {"#1a2535" if self._theme == "dark" else "#dde2e8"};
+                color: {muted};
+                border-color: {border};
             }}
             QTreeView#sftpTree {{
                 background-color: {surface};
@@ -378,12 +410,16 @@ class SftpBrowserWindow(FramelessDialog):
                 gridline-color: {border};
                 font-size: 12px;
             }}
+            QTreeView#sftpTree::item {{
+                padding: 6px 8px;
+                border-bottom: 1px solid {border};
+            }}
             QTreeView#sftpTree::item:selected {{
                 background-color: {accent};
                 color: #ffffff;
             }}
             QTreeView#sftpTree::item:hover {{
-                background-color: {"rgba(0,119,182,0.10)" if self._theme == "dark" else "rgba(0,119,182,0.08)"};
+                background-color: {bg};
             }}
             QHeaderView::section {{
                 background-color: {bg};
@@ -391,13 +427,13 @@ class SftpBrowserWindow(FramelessDialog):
                 border: none;
                 border-bottom: 1px solid {border};
                 border-right: 1px solid {border};
-                padding: 4px 6px;
+                padding: 8px 10px;
                 font-size: 11px;
                 font-weight: 600;
             }}
             QLabel#sftpStatusLbl {{
                 background-color: {bg};
-                color: {"#6a7a8a" if self._theme == "dark" else "#7a8a9a"};
+                color: {muted};
                 font-size: 11px;
                 border-top: 1px solid {border};
             }}
@@ -413,41 +449,63 @@ class SftpBrowserWindow(FramelessDialog):
         )
 
     def _connect_and_load(self) -> None:
+        if self._close_requested:
+            return
         self._set_status(tr("sftp.status.connecting"))
         # FTP has no host keys — only SFTP needs the trust-on-first-use prompt.
         tofu = None if self._is_ftp else self._tofu_callback
         worker = SftpConnectWorker(self._client, self._conn, tofu)
         worker.connected.connect(self._on_connected)
         worker.error.connect(self._on_connect_error)
-        self._workers.append(worker)
-        worker.finished.connect(lambda: self._workers.remove(worker) if worker in self._workers else None)
+        self._track_worker(worker)
+        worker.finished.connect(lambda: self._remove_worker_when_stopped(worker))
         worker.start()
 
     def _on_connected(self) -> None:
+        if self._close_requested:
+            return
         self._navigate_to(self._current_path, push_history=False)
 
     def _on_connect_error(self, msg: str) -> None:
+        if self._close_requested:
+            return
         self._set_status(tr("sftp.status.connect_failed"))
         StyledMessageBox.critical(self, tr("sftp.error.connect_title"), msg)
 
     def _tofu_callback(self, host: str, port: int, fingerprint: str) -> bool:
-        """Called from worker thread — dispatches dialog to the main thread and waits."""
-        result_holder: list[bool] = [False]
-        event = threading.Event()
+        """Dispatch host-key confirmation to the GUI thread and wait for choice."""
+        if self._close_requested:
+            return False
+        if QThread.currentThread() == self.thread():
+            return self._show_tofu_dialog(host, fingerprint)
+        state = {"event": threading.Event(), "accepted": False, "cancelled": False}
+        self._pending_tofu_requests.append(state)
+        try:
+            self._tofu_requested.emit(host, port, fingerprint, state)
+            if not state["event"].wait(timeout=60):
+                state["cancelled"] = True
+                return False
+            return state["accepted"]
+        finally:
+            if state in self._pending_tofu_requests:
+                self._pending_tofu_requests.remove(state)
 
-        def _ask() -> None:
-            result_holder[0] = StyledMessageBox.question(
-                self,
-                tr("sftp.tofu.title"),
-                tr("sftp.tofu.body", host=host, fingerprint=fingerprint),
-                yes_text=tr("dialog.yes"),
-                no_text=tr("dialog.no"),
-            )
-            event.set()
+    def _show_tofu_dialog(self, host: str, fingerprint: str) -> bool:
+        return StyledMessageBox.question(
+            self,
+            tr("sftp.tofu.title"),
+            tr("sftp.tofu.body", host=host, fingerprint=fingerprint),
+            yes_text=tr("dialog.yes"),
+            no_text=tr("dialog.no"),
+        )
 
-        QTimer.singleShot(0, _ask)
-        event.wait(timeout=60)
-        return result_holder[0]
+    @pyqtSlot(str, int, str, object)
+    def _dispatch_tofu_dialog(self, host: str, port: int, fingerprint: str, state) -> None:
+        try:
+            if not self._close_requested and not state.get("cancelled", False):
+                state["accepted"] = self._show_tofu_dialog(host, fingerprint)
+        finally:
+            state["event"].set()
 
     # ── Navigation ───────────────────────────────────────────────────────────
 
@@ -494,6 +552,8 @@ class SftpBrowserWindow(FramelessDialog):
     # ── Directory loading ────────────────────────────────────────────────────
 
     def _load_directory(self, path: str) -> None:
+        if self._close_requested:
+            return
         if self._active_list_worker and self._active_list_worker.isRunning():
             try:
                 self._active_list_worker.finished.disconnect()
@@ -507,9 +567,9 @@ class SftpBrowserWindow(FramelessDialog):
         worker.finished.connect(self._on_list_finished)
         worker.error.connect(self._on_list_error)
         self._active_list_worker = worker
-        self._workers.append(worker)
-        worker.finished.connect(lambda *_: self._workers.remove(worker) if worker in self._workers else None)
-        worker.error.connect(lambda *_: self._workers.remove(worker) if worker in self._workers else None)
+        self._track_worker(worker)
+        worker.finished.connect(lambda *_: self._remove_worker_when_stopped(worker))
+        worker.error.connect(lambda *_: self._remove_worker_when_stopped(worker))
         worker.start()
 
     def _on_list_finished(self, path: str, entries: list) -> None:
@@ -538,12 +598,23 @@ class SftpBrowserWindow(FramelessDialog):
     # ── Download ─────────────────────────────────────────────────────────────
 
     def _download_and_open(self, entry: SftpEntry) -> None:
+        # Remote names are untrusted even when the SSH host itself is trusted.
+        try:
+            validate_remote_filename(entry.name)
+        except ValueError as error:
+            StyledMessageBox.critical(self, self._error_title(), str(error))
+            return
         tmp_dir = tempfile.mkdtemp(prefix="neossh_sftp_")
-        local_path = os.path.join(tmp_dir, entry.name)
+        try:
+            local_path = confined_download_path(tmp_dir, entry.name)
+        except (OSError, ValueError) as error:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            StyledMessageBox.critical(self, self._error_title(), str(error))
+            return
         remote_path = entry.path
 
         worker = SftpDownloadWorker(self._client, remote_path, local_path)
-        self._workers.append(worker)
+        self._track_worker(worker)
 
         fname = entry.name
         prog = QProgressDialog(
@@ -559,67 +630,144 @@ class SftpBrowserWindow(FramelessDialog):
             if total > 0:
                 prog.setValue(int(done * 100 / total))
 
+        def _cleanup_temp_download() -> None:
+            self._edit_map.pop(local_path, None)
+            self._edit_uploaded_versions.pop(local_path, None)
+            self._edit_generations.pop(local_path, None)
+            if local_path in self._watcher.files():
+                self._watcher.removePath(local_path)
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
         def _on_finished(lp: str) -> None:
             prog.close()
-            if worker in self._workers:
-                self._workers.remove(worker)
+            self._remove_worker_when_stopped(worker)
+            if self._close_requested:
+                _cleanup_temp_download()
+                return
             # Register for edit-watch before opening so we catch the first save
             self._edit_map[lp] = remote_path
+            self._edit_uploaded_versions[lp] = self._edit_version(lp)
             self._watcher.addPath(lp)
             try:
                 os.startfile(lp)
             except Exception as e:
+                _cleanup_temp_download()
                 StyledMessageBox.critical(self, self._error_title(), str(e))
 
         def _on_error(msg: str) -> None:
             prog.close()
-            if worker in self._workers:
-                self._workers.remove(worker)
+            self._remove_worker_when_stopped(worker)
+            _cleanup_temp_download()
             StyledMessageBox.critical(self, tr("sftp.error.download_title"), msg)
 
+        def _on_cancelled() -> None:
+            prog.close()
+            self._remove_worker_when_stopped(worker)
+            _cleanup_temp_download()
+
+        prog.canceled.connect(worker.cancel)
         worker.progress.connect(_on_progress)
         worker.finished.connect(_on_finished)
         worker.error.connect(_on_error)
+        worker.cancelled.connect(_on_cancelled)
         worker.start()
 
-    def _on_watched_file_changed(self, local_path: str) -> None:
-        """Called by QFileSystemWatcher when a watched temp file is modified."""
-        remote_path = self._edit_map.get(local_path)
-        if not remote_path:
-            return
-        # Some editors delete-and-recreate on save; re-add the path if it dropped out.
-        if local_path not in self._watcher.files():
-            QTimer.singleShot(200, lambda: self._watcher.addPath(local_path))
+    def _edit_version(self, local_path: str) -> tuple:
+        """Cheap conservative identity; watcher generations catch equal-stat saves."""
+        info = os.stat(local_path)
+        return (info.st_mtime_ns, info.st_size, info.st_ino,
+                self._edit_generations.get(local_path, 0))
 
-        # Debounce: wait 500 ms after the last change event before uploading,
-        # because editors often write in multiple bursts.
-        if local_path in self._edit_timers:
-            self._edit_timers[local_path].stop()
+    def _queue_edit(self, local_path: str, remote_path: str) -> None:
+        item = (local_path, remote_path)
+        if item not in self._close_pending_edits:
+            self._close_pending_edits.append(item)
 
+    def _restore_edit_watch(self, local_path: str) -> None:
+        # Atomic-replace saves remove QFileSystemWatcher's file registration.
+        if (local_path in self._edit_map and os.path.exists(local_path)
+                and local_path not in self._watcher.files()):
+            self._watcher.addPath(local_path)
+
+    def _schedule_edit_upload(self, local_path: str, remote_path: str) -> None:
+        old = self._edit_timers.pop(local_path, None)
+        if old is not None:
+            old.stop()
+            old.deleteLater()
         timer = QTimer(self)
         timer.setSingleShot(True)
         timer.timeout.connect(lambda: self._upload_edited_file(local_path, remote_path))
         self._edit_timers[local_path] = timer
         timer.start(500)
 
+    def _on_watched_file_changed(self, local_path: str) -> None:
+        """Retain saves during flush/disconnect instead of dropping late edits."""
+        remote_path = self._edit_map.get(local_path)
+        if not remote_path:
+            return
+        self._edit_generations[local_path] = self._edit_generations.get(local_path, 0) + 1
+        self._close_last_change_at = time.monotonic()
+        self._restore_edit_watch(local_path)
+        QTimer.singleShot(200, lambda: self._restore_edit_watch(local_path))
+        if self._close_requested or self._disconnect_thread is not None or self._edit_reconnecting:
+            self._queue_edit(local_path, remote_path)
+            if self._disconnect_thread is not None:
+                self._shutdown_recovery_reason = "Local edits changed while disconnecting; shutdown cancelled"
+            return
+        self._schedule_edit_upload(local_path, remote_path)
+
     def _upload_edited_file(self, local_path: str, remote_path: str) -> None:
-        """Silently upload a temp file back to the server after the user saved it."""
-        self._edit_timers.pop(local_path, None)
-        if not os.path.exists(local_path):
+        """Upload a START version, never claim a later local save was uploaded."""
+        timer = self._edit_timers.pop(local_path, None)
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+        if (self._disconnect_thread is not None or self._edit_reconnecting
+                or self._edit_reconnect_failed):
+            self._queue_edit(local_path, remote_path)
+            return
+        if local_path in self._edit_uploads:
+            self._queue_edit(local_path, remote_path)
+            return
+        try:
+            start_version = self._edit_version(local_path)
+        except OSError:
+            if self._close_requested:
+                reason = f"Edited local file is missing; shutdown cancelled: {local_path}"
+                self._abort_shutdown(reason, local_path, remote_path)
+                StyledMessageBox.critical(self, tr("sftp.error.upload_title"), reason)
+            return
+        if self._edit_uploaded_versions.get(local_path) == start_version:
             return
         fname = os.path.basename(local_path)
         worker = SftpUploadWorker(self._client, local_path, remote_path)
-        self._workers.append(worker)
+        self._edit_uploads.add(local_path)
+        self._track_worker(worker)
 
         def _on_finished(_remote: str) -> None:
-            if worker in self._workers:
-                self._workers.remove(worker)
+            self._edit_uploads.discard(local_path)
+            self._edit_uploaded_versions[local_path] = start_version
+            self._remove_worker_when_stopped(worker)
             self._set_status(tr("sftp.status.saved", name=fname))
-            self._on_refresh()
+            try:
+                changed = self._edit_version(local_path) != start_version
+            except OSError:
+                changed = True
+            if changed:
+                self._close_last_change_at = time.monotonic()
+                if self._close_requested:
+                    self._queue_edit(local_path, remote_path)
+                else:
+                    self._schedule_edit_upload(local_path, remote_path)
+            if not self._close_requested:
+                self._on_refresh()
 
         def _on_error(msg: str) -> None:
-            if worker in self._workers:
-                self._workers.remove(worker)
+            self._edit_uploads.discard(local_path)
+            self._queue_edit(local_path, remote_path)
+            self._remove_worker_when_stopped(worker)
+            if self._close_requested:
+                self._abort_shutdown(msg, local_path, remote_path)
             StyledMessageBox.critical(
                 self, tr("sftp.error.upload_title"),
                 tr("sftp.error.edit_upload_failed", name=fname, msg=msg),
@@ -644,7 +792,7 @@ class SftpBrowserWindow(FramelessDialog):
         prog.setValue(0)
 
         worker = SftpDownloadWorker(self._client, remote_path, local_path)
-        self._workers.append(worker)
+        self._track_worker(worker)
 
         def _on_progress(done: int, total: int) -> None:
             if total > 0:
@@ -652,9 +800,8 @@ class SftpBrowserWindow(FramelessDialog):
 
         def _on_finished(lp: str) -> None:
             prog.close()
-            if worker in self._workers:
-                self._workers.remove(worker)
-            if open_after:
+            self._remove_worker_when_stopped(worker)
+            if open_after and not self._close_requested:
                 try:
                     os.startfile(lp)
                 except Exception as e:
@@ -662,13 +809,18 @@ class SftpBrowserWindow(FramelessDialog):
 
         def _on_error(msg: str) -> None:
             prog.close()
-            if worker in self._workers:
-                self._workers.remove(worker)
+            self._remove_worker_when_stopped(worker)
             StyledMessageBox.critical(self, tr("sftp.error.download_title"), msg)
 
+        def _on_cancelled() -> None:
+            prog.close()
+            self._remove_worker_when_stopped(worker)
+
+        prog.canceled.connect(worker.cancel)
         worker.progress.connect(_on_progress)
         worker.finished.connect(_on_finished)
         worker.error.connect(_on_error)
+        worker.cancelled.connect(_on_cancelled)
         worker.start()
 
     # ── Upload ───────────────────────────────────────────────────────────────
@@ -689,7 +841,7 @@ class SftpBrowserWindow(FramelessDialog):
         fname = os.path.basename(local_path)
         prog = QProgressDialog(
             tr("sftp.progress.uploading", name=fname),
-            tr("dialog.cancel"),
+            "",
             0, 100, self,
         )
         prog.setWindowTitle(tr("sftp.error.upload_title"))
@@ -698,7 +850,7 @@ class SftpBrowserWindow(FramelessDialog):
         prog.setValue(0)
 
         worker = SftpUploadWorker(self._client, local_path, remote_path)
-        self._workers.append(worker)
+        self._track_worker(worker)
 
         def _on_progress(done: int, total: int) -> None:
             if total > 0:
@@ -706,14 +858,12 @@ class SftpBrowserWindow(FramelessDialog):
 
         def _on_finished(_remote: str) -> None:
             prog.close()
-            if worker in self._workers:
-                self._workers.remove(worker)
+            self._remove_worker_when_stopped(worker)
             self._on_refresh()
 
         def _on_error(msg: str) -> None:
             prog.close()
-            if worker in self._workers:
-                self._workers.remove(worker)
+            self._remove_worker_when_stopped(worker)
             StyledMessageBox.critical(self, tr("sftp.error.upload_title"), msg)
 
         worker.progress.connect(_on_progress)
@@ -773,17 +923,18 @@ class SftpBrowserWindow(FramelessDialog):
             tr("sftp.delete.confirm", name=entry.name),
             yes_text=tr("dialog.yes"),
             no_text=tr("dialog.no"),
+            destructive=True,
         )
         if not confirmed:
             return
         worker = SftpDeleteWorker(self._client, entry.path, entry.is_dir)
-        self._workers.append(worker)
+        self._track_worker(worker)
         worker.finished.connect(lambda _: (
-            self._workers.remove(worker) if worker in self._workers else None,
+            self._remove_worker_when_stopped(worker),
             self._on_refresh(),
         ))
         worker.error.connect(lambda msg: (
-            self._workers.remove(worker) if worker in self._workers else None,
+            self._remove_worker_when_stopped(worker),
             StyledMessageBox.critical(self, tr("sftp.error.delete_title"), msg),
         ))
         worker.start()
@@ -797,13 +948,13 @@ class SftpBrowserWindow(FramelessDialog):
         parent = entry.path.rsplit("/", 1)[0] or "/"
         new_path = parent.rstrip("/") + "/" + new_name.strip()
         worker = SftpRenameWorker(self._client, entry.path, new_path)
-        self._workers.append(worker)
+        self._track_worker(worker)
         worker.finished.connect(lambda *_: (
-            self._workers.remove(worker) if worker in self._workers else None,
+            self._remove_worker_when_stopped(worker),
             self._on_refresh(),
         ))
         worker.error.connect(lambda msg: (
-            self._workers.remove(worker) if worker in self._workers else None,
+            self._remove_worker_when_stopped(worker),
             StyledMessageBox.critical(self, tr("sftp.error.rename_title"), msg),
         ))
         worker.start()
@@ -816,18 +967,54 @@ class SftpBrowserWindow(FramelessDialog):
             return
         new_path = self._current_path.rstrip("/") + "/" + name.strip()
         worker = SftpMkdirWorker(self._client, new_path)
-        self._workers.append(worker)
+        self._track_worker(worker)
         worker.finished.connect(lambda _: (
-            self._workers.remove(worker) if worker in self._workers else None,
+            self._remove_worker_when_stopped(worker),
             self._on_refresh(),
         ))
         worker.error.connect(lambda msg: (
-            self._workers.remove(worker) if worker in self._workers else None,
+            self._remove_worker_when_stopped(worker),
             StyledMessageBox.critical(self, tr("sftp.error.mkdir_title"), msg),
         ))
         worker.start()
 
     # ── Helpers ──────────────────────────────────────────────────────────────
+
+    def _track_worker(self, worker) -> None:
+        self._workers.append(worker)
+        if isinstance(worker, (SftpDownloadWorker, SftpUploadWorker)):
+            self._pending_transfer_results.add(worker)
+        if not self._worker_reaper_timer.isActive():
+            self._worker_reaper_timer.start()
+
+    def _remove_worker_when_stopped(self, worker) -> None:
+        # Result signals may be emitted from run() just before QThread stops.
+        # Keep the reference until isRunning() is actually false; the GUI timer
+        # below will reap it if this callback arrives too early or off-thread.
+        if QThread.currentThread() != self.thread():
+            return
+        self._pending_transfer_results.discard(worker)
+        try:
+            if worker.isRunning() or not worker.wait(0):
+                return
+        except RuntimeError:
+            pass
+        if worker in self._workers:
+            self._workers.remove(worker)
+        if not self._workers:
+            self._worker_reaper_timer.stop()
+
+    def _reap_stopped_workers(self) -> None:
+        for worker in list(self._workers):
+            try:
+                running = worker.isRunning() or not worker.wait(0)
+            except RuntimeError:
+                running = False
+            if (not running and worker not in self._pending_transfer_results
+                    and worker in self._workers):
+                self._workers.remove(worker)
+        if not self._workers:
+            self._worker_reaper_timer.stop()
 
     def _set_status(self, msg: str) -> None:
         self._status_lbl.setText(msg)
@@ -842,13 +1029,224 @@ class SftpBrowserWindow(FramelessDialog):
 
     # ── Close ────────────────────────────────────────────────────────────────
 
+    def request_shutdown(self) -> None:
+        if not self._close_ready:
+            self.close()
+
+    def is_shutdown_complete(self) -> bool:
+        return self._close_ready and self._disconnect_done.is_set()
+
+    def cancel_shutdown(self) -> None:
+        if self._close_ready:
+            return
+        if self._disconnect_thread is not None:
+            # Never reconnect before the actual disconnect has finished.
+            self._shutdown_recovery_reason = "Shutdown cancelled while disconnecting"
+            return
+        was_closing = self._close_requested
+        self._close_requested = False
+        if self._close_wait_timer:
+            self._close_wait_timer.stop()
+        self._fdlg_content.setEnabled(not self._edit_reconnecting)
+        for path, remote in self._edit_map.items():
+            self._restore_edit_watch(path)
+            if was_closing and not self._aborting_shutdown and not self._edit_reconnecting:
+                try:
+                    dirty = self._edit_uploaded_versions.get(path) != self._edit_version(path)
+                except OSError:
+                    continue
+                if dirty:
+                    self._schedule_edit_upload(path, remote)
+
+    def _resume_after_disconnect(self, reason: str) -> None:
+        """Recover the still-open editor session entirely through a Qt worker."""
+        self._disconnect_thread = None
+        self._disconnect_done.clear()
+        self._disconnect_versions.clear()
+        self._shutdown_recovery_reason = None
+        self._close_requested = False
+        self._close_ready = False
+        self._close_wait_timer.stop()
+        self._edit_reconnecting = True
+        self._edit_reconnect_failed = False
+        self._fdlg_content.setEnabled(False)
+        # MainWindow cancels its own exit/unmount phase synchronously here.
+        self.shutdown_failed.emit(reason)
+        tofu = None if self._is_ftp else self._tofu_callback
+        worker = SftpConnectWorker(self._client, self._conn, tofu)
+        self._track_worker(worker)
+
+        def connected() -> None:
+            self._edit_reconnecting = False
+            self._remove_worker_when_stopped(worker)
+            self._fdlg_content.setEnabled(not self._close_requested)
+            for path, remote in self._edit_map.items():
+                self._restore_edit_watch(path)
+                try:
+                    dirty = self._edit_uploaded_versions.get(path) != self._edit_version(path)
+                except OSError:
+                    dirty = True
+                if dirty:
+                    self._queue_edit(path, remote)
+                    if not self._close_requested:
+                        self._schedule_edit_upload(path, remote)
+
+        def failed(message: str) -> None:
+            self._edit_reconnecting = False
+            self._edit_reconnect_failed = True
+            self._remove_worker_when_stopped(worker)
+            self._fdlg_content.setEnabled(True)
+            self.cancel_shutdown()
+            self.shutdown_failed.emit(message)
+            StyledMessageBox.critical(self, tr("sftp.error.connect_title"), message)
+
+        worker.connected.connect(connected)
+        worker.error.connect(failed)
+        worker.finished.connect(lambda: self._remove_worker_when_stopped(worker))
+        worker.start()
+
+    def _abort_shutdown(self, reason: str, local_path: str, remote_path: str) -> None:
+        item = (local_path, remote_path)
+        if item not in self._close_pending_edits:
+            self._close_pending_edits.insert(0, item)
+        self._aborting_shutdown = True
+        try:
+            self.cancel_shutdown()
+        finally:
+            self._aborting_shutdown = False
+        self.shutdown_failed.emit(reason)
+
+    def _disconnect_client(self) -> None:
+        try:
+            self._client.disconnect()
+        except Exception as error:
+            self._disconnect_error = error
+            logger.warning("File browser disconnect failed: %s", error)
+        finally:
+            self._disconnect_done.set()
+
+    def reject(self) -> None:
+        # Titlebar rejection must use the same asynchronous shutdown gate.
+        if self._close_ready:
+            super().reject()
+        else:
+            self.close()
+
+    def done(self, result: int) -> None:
+        if self._close_ready:
+            super().done(result)
+        else:
+            self.close()
+
     def closeEvent(self, event) -> None:
-        for t in self._edit_timers.values():
-            t.stop()
-        self._edit_timers.clear()
-        if self._watcher.files():
-            self._watcher.removePaths(self._watcher.files())
-        self._edit_map.clear()
-        client = self._client
-        threading.Thread(target=client.disconnect, daemon=True, name="SftpDisconnect").start()
-        super().closeEvent(event)
+        if self._close_ready:
+            if self._close_wait_timer:
+                self._close_wait_timer.stop()
+            if self._worker_reaper_timer:
+                self._worker_reaper_timer.stop()
+            if self._watcher.files():
+                self._watcher.removePaths(self._watcher.files())
+            self._edit_map.clear()
+            self._workers.clear()
+            self._active_list_worker = None
+            # The idle gate has already awaited the disconnect thread.
+            super().closeEvent(event)
+            return
+
+        # Keep the window alive until pending edits have been uploaded and all
+        # workers have stopped; disconnecting a shared Paramiko client mid-I/O
+        # can corrupt remote uploads.
+        event.ignore()
+        if not self._close_requested:
+            self._close_requested = True
+            self._close_last_change_at = time.monotonic()
+            self._close_observed_versions.clear()
+            self._fdlg_content.setEnabled(False)
+            for state in list(self._pending_tofu_requests):
+                state["accepted"] = False
+                state["cancelled"] = True
+                state["event"].set()
+            pending_edits = [
+                (path, self._edit_map.get(path)) for path in self._edit_timers
+            ]
+            for timer in self._edit_timers.values():
+                timer.stop()
+            self._edit_timers.clear()
+            # Keep edit watches alive through flush AND the disconnect thread.
+            for local_path, remote_path in pending_edits:
+                item = (local_path, remote_path)
+                if remote_path and item not in self._close_pending_edits:
+                    self._close_pending_edits.append(item)
+
+        if self._close_wait_timer is None:
+            self._close_wait_timer = QTimer(self)
+            self._close_wait_timer.setInterval(100)
+            self._close_wait_timer.timeout.connect(self._finish_close_when_idle)
+        if not self._close_wait_timer.isActive():
+            self._close_wait_timer.start()
+
+    def _scan_close_edits(self) -> str | None:
+        """Rescan every round: watcher events can be coalesced or lost on replace."""
+        for path, remote in self._edit_map.items():
+            self._restore_edit_watch(path)
+            try:
+                version = self._edit_version(path)
+            except OSError:
+                self._queue_edit(path, remote)
+                return f"Edited local file is missing; shutdown cancelled: {path}"
+            if self._close_observed_versions.get(path) != version:
+                self._close_observed_versions[path] = version
+                self._close_last_change_at = time.monotonic()
+            if self._edit_uploaded_versions.get(path) != version and path not in self._edit_uploads:
+                self._queue_edit(path, remote)
+            if (self._disconnect_thread is not None
+                    and self._disconnect_versions.get(path) != version):
+                self._shutdown_recovery_reason = "Local edits changed while disconnecting; shutdown cancelled"
+        return None
+
+    def _finish_close_when_idle(self) -> None:
+        if not self._close_requested:
+            return
+        problem = self._scan_close_edits()
+        if (self._pending_transfer_results
+                or any(worker.isRunning() or not worker.wait(0) for worker in self._workers)):
+            return
+        if self._disconnect_thread is not None:
+            if problem:
+                self._shutdown_recovery_reason = problem
+            if not self._disconnect_done.is_set():
+                return
+            if self._shutdown_recovery_reason:
+                self._resume_after_disconnect(self._shutdown_recovery_reason)
+                return
+            self._close_ready = True
+            if self._close_wait_timer:
+                self._close_wait_timer.stop()
+            self.close()
+            return
+        if problem:
+            path, remote = self._close_pending_edits[-1]
+            self._abort_shutdown(problem, path, remote)
+            StyledMessageBox.critical(self, tr("sftp.error.upload_title"), problem)
+            return
+        if self._edit_reconnect_failed:
+            self.cancel_shutdown()
+            self.shutdown_failed.emit("Reconnect failed; local edits retained")
+            return
+        if self._edit_reconnecting:
+            return
+        if self._close_pending_edits:
+            local_path, remote_path = self._close_pending_edits.pop(0)
+            self._upload_edited_file(local_path, remote_path)
+            return
+        # Watcher/stat changes reset this clock. No disconnect until every
+        # successful START version is current and the editor has been quiet.
+        if time.monotonic() - self._close_last_change_at < 0.5:
+            return
+        self._disconnect_versions = dict(self._close_observed_versions)
+        self._disconnect_error = None
+        self._disconnect_done.clear()
+        self._disconnect_thread = threading.Thread(
+            target=self._disconnect_client, daemon=True, name="SftpDisconnect"
+        )
+        self._disconnect_thread.start()

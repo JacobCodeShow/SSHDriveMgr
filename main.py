@@ -22,7 +22,8 @@ if len(sys.argv) > 1 and sys.argv[1] == "--pass-helper":
     import ctypes
     import ctypes.wintypes
 
-    pipe_name = r"\\.\pipe\SSHDriveMgr_IPC_v1"
+    from src.windows_identity import ipc_pipe_name
+    pipe_name = ipc_pipe_name()
     GENERIC_READ = 0x80000000
     GENERIC_WRITE = 0x40000000
     OPEN_EXISTING = 3
@@ -100,13 +101,10 @@ if any(arg in sys.argv for arg in ("--connect-cli", "-connectssh")):
     )
     sys.exit(2)
 
-# ── 1. Single-instance check (before QApplication and all others) ─────────────
-from src.single_instance import ensure_single_instance
-ensure_single_instance()
-
+# Elevation must happen before acquiring the single-instance mutex: otherwise
+# the elevated child can see the parent's mutex and immediately exit.
 # ── 2. Now import everything else ────────────────────────────────
 import ctypes
-import json
 
 # Ensure src/ is importable from project root
 sys.path.insert(0, os.path.dirname(__file__))
@@ -129,27 +127,22 @@ def _request_elevation() -> bool:
     if "--no-elevate" in sys.argv:
         return False
     
+    from src.startup_settings import read_bootstrap_preferences, elevation_launch_arguments
+    if not read_bootstrap_preferences()["require_admin"]:
+        return False
+
     try:
-        from src.config import get_config_path, AppSettings
-        config_file = get_config_path()
-        if config_file.exists():
-            with open(config_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                settings = AppSettings.from_dict(data.get('settings', {}))
-                if not settings.require_admin:
-                    return False
-    except Exception:
-        pass
-    
-    try:
-        params = " ".join(f'"{a}"' if " " in a else a for a in sys.argv[1:] if a != "--no-elevate")
+        params = elevation_launch_arguments(sys.argv[1:])
         ret = ctypes.windll.shell32.ShellExecuteW(
-            None, "runas", sys.executable, params, None, 1  # SW_SHOWNORMAL
+            None, "runas", sys.executable, params,
+            str(Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent),
+            1  # SW_SHOWNORMAL
         )
         if ret > 32:
             return True
-    except Exception:
-        pass
+    except Exception as error:
+        print(f"Administrator restart failed: {error}", file=sys.stderr)
+    # UAC cancellation/failure leaves this instance usable without admin rights.
     return False
 
 
@@ -157,7 +150,6 @@ from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont, QIcon
 
-from src.ui.theme import STYLESHEET, get_stylesheet
 # NOTE: MainWindow is imported lazily inside main() AFTER successful login.
 # Its module (256 KB) pulls in connection_card, system_tray, debug_window,
 # sftp_browser, sshfs_controller/psutil and many post-login-only widgets;
@@ -167,7 +159,6 @@ from src.database import init_db
 from src.ui.dialogs.login_dialog import LoginDialog
 from src.auth_manager import Session
 from src.i18n import tr
-from src.channel import display_name
 
 
 def _install_global_exception_handlers():
@@ -257,19 +248,12 @@ def _install_global_exception_handlers():
 
 
 def main():
-    # Admin elevation only if permanently enabled in settings
-    if os.name == "nt":
-        try:
-            from src.config import get_config_path, AppSettings
-            config_file = get_config_path()
-            if config_file.exists():
-                with open(config_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    settings = AppSettings.from_dict(data.get('settings', {}))
-                    if settings.require_admin and _request_elevation():
-                        sys.exit(0)
-        except Exception:
-            pass
+    # The single per-Windows-user pre-login preference works before DB/login.
+    if os.name == "nt" and _request_elevation():
+        sys.exit(0)
+
+    from src.single_instance import ensure_single_instance
+    ensure_single_instance()
 
     # Enable HiDPI scaling
     QApplication.setHighDpiScaleFactorRoundingPolicy(
@@ -340,7 +324,7 @@ def main():
             print("PROBE late QtWebEngineWidgets import: OK", file=sys.stderr)
         except Exception as _pe:
             print(f"PROBE late QtWebEngineWidgets import FAILED: {_pe!r}", file=sys.stderr)
-    app_name = display_name()
+    app_name = tr("app.title")
     app.setApplicationName(app_name)
     app.setApplicationDisplayName(app_name)
     app.setApplicationVersion(APP_VERSION)
@@ -380,15 +364,21 @@ def main():
 
     # Apply global stylesheet
     from src.ui.theme import THEME_COLORS
-    # Apply global stylesheet via ThemeManager
+    # Apply the semantic theme before login; the same token source feeds native Qt popups.
     from src.theme_manager import get_theme_manager
-    get_theme_manager().apply_theme(app, "dark")
+    theme_manager = get_theme_manager()
+    theme_manager.apply_theme(app, "dark")
 
-    # Setze Palette für native Popups
     from PyQt6.QtGui import QPalette, QColor
     palette = app.palette()
-    palette.setColor(QPalette.ColorRole.Window, QColor(THEME_COLORS["dark"]["surface"]))
-    palette.setColor(QPalette.ColorRole.WindowText, QColor(THEME_COLORS["dark"]["text"]))
+    base_colors = theme_manager.get_colors("dark")
+    palette.setColor(QPalette.ColorRole.Window, QColor(base_colors["surface"]))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor(base_colors["text"]))
+    palette.setColor(QPalette.ColorRole.Base, QColor(base_colors["background"]))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(base_colors["surface"]))
+    palette.setColor(QPalette.ColorRole.Text, QColor(base_colors["text"]))
+    palette.setColor(QPalette.ColorRole.Button, QColor(base_colors["surface"]))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor(base_colors["text"]))
     app.setPalette(palette)
 
     # ── 3. Database Initialization ────────────────────────────────
@@ -400,6 +390,33 @@ def main():
     run_startup_check(data_dir())
 
     init_db()
+
+    # Load only language/theme before authentication: never read a credential or
+    # connection record. A remembered username selects its UI preference; a
+    # single-user install can safely use that account's preference as well.
+    try:
+        from src.prelogin_preferences import load_prelogin_preferences
+        from src.i18n import set_language, is_rtl
+        preferences = load_prelogin_preferences()
+        if preferences:
+            set_language(preferences["language"])
+            app.setLayoutDirection(
+                Qt.LayoutDirection.RightToLeft if is_rtl() else Qt.LayoutDirection.LeftToRight
+            )
+            get_theme_manager().apply_theme(app, preferences["theme"])
+            base_colors = get_theme_manager().get_colors()
+            palette.setColor(QPalette.ColorRole.Window, QColor(base_colors["surface"]))
+            palette.setColor(QPalette.ColorRole.WindowText, QColor(base_colors["text"]))
+            palette.setColor(QPalette.ColorRole.Base, QColor(base_colors["background"]))
+            palette.setColor(QPalette.ColorRole.AlternateBase, QColor(base_colors["surface"]))
+            palette.setColor(QPalette.ColorRole.Text, QColor(base_colors["text"]))
+            palette.setColor(QPalette.ColorRole.Button, QColor(base_colors["surface"]))
+            palette.setColor(QPalette.ColorRole.ButtonText, QColor(base_colors["text"]))
+            app.setPalette(palette)
+            app.setApplicationName(tr("app.title"))
+            app.setApplicationDisplayName(tr("app.title"))
+    except Exception as preference_error:
+        logger.debug("Pre-login appearance preference unavailable: %s", preference_error)
 
     # NOTE: a previous "Windows Auto-Login" probe here read USERNAME,
     # looked up the user, checked app_settings.auto_login — and then
@@ -444,30 +461,31 @@ def main():
         )
         from src.theme_manager import get_theme_manager
         get_theme_manager().apply_theme(app, user_settings.theme)
+        # Update native shell/taskbar metadata after the saved language is known.
+        localized_name = tr("app.title")
+        app.setApplicationName(localized_name)
+        app.setApplicationDisplayName(localized_name)
         
     except Exception as e:
         logger.warning(f"Language/theme init failed: {e}")
 
-    # ── Prerequisite check: WinFSP + SSHFS-Win required ─────────────────
+    # ── Optional drive-mount prerequisites (SSH/FTP do not need these) ───
     from src.sshfs_controller import SSHFSController
     import webbrowser as _webbrowser
     _prereq = SSHFSController.get_install_status()
     if not _prereq["winfsp"] or not _prereq["sshfs_win"]:
-        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
-        from PyQt6.QtCore import Qt as _Qt
-        _dlg = QDialog()
+        from PyQt6.QtWidgets import QVBoxLayout, QHBoxLayout, QLabel, QPushButton
+        from src.ui.frameless_dialog import FramelessDialog
+        _dlg = FramelessDialog()
         _dlg.setWindowTitle(tr("prereq.dialog.title"))
         _dlg.setMinimumWidth(440)
-        _dlg.setWindowFlag(_Qt.WindowType.WindowCloseButtonHint, False)
-        _vl = QVBoxLayout(_dlg)
+        _vl = QVBoxLayout(_dlg._fdlg_content)
         _vl.setSpacing(16)
         _vl.setContentsMargins(24, 24, 24, 24)
-        if not _prereq["winfsp"] and not _prereq["sshfs_win"]:
-            _msg = tr("prereq.dialog.text_both")
-        elif not _prereq["winfsp"]:
-            _msg = tr("prereq.dialog.text_winfsp")
-        else:
-            _msg = tr("prereq.dialog.text_sshfs")
+        _missing = ", ".join(name for name, installed in (
+            ("WinFSP", _prereq["winfsp"]), ("SSHFS-Win", _prereq["sshfs_win"])
+        ) if not installed)
+        _msg = tr("prereq.dialog.optional_text", missing=_missing)
         _lbl = QLabel(_msg)
         _lbl.setWordWrap(True)
         _vl.addWidget(_lbl)
@@ -482,11 +500,11 @@ def main():
             _b2.clicked.connect(lambda: _webbrowser.open("https://github.com/winfsp/sshfs-win/releases/latest"))
             _btn_row.addWidget(_b2)
         _vl.addLayout(_btn_row)
-        _exit_btn = QPushButton(tr("prereq.dialog.exit"))
-        _exit_btn.clicked.connect(_dlg.accept)
-        _vl.addWidget(_exit_btn)
-        _dlg.exec()
-        sys.exit(0)
+        _continue_btn = QPushButton(tr("dialog.ok"))
+        _continue_btn.setObjectName("primaryBtn")
+        _continue_btn.clicked.connect(_dlg.accept)
+        _vl.addWidget(_continue_btn)
+        _dlg.exec()  # OK, Escape and titlebar close all continue to the main UI.
 
     try:
         # Imported lazily (see note at top): the loading splash shown by the

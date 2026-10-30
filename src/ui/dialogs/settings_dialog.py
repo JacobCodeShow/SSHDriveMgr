@@ -191,7 +191,7 @@ class SettingsDialog(QDialog):
         root.addSpacing(10)
 
         # ── APPEARANCE ────────────────────────────────────────────────
-        root.addWidget(self._section_header("外观"))
+        root.addWidget(self._section_header(tr("settings.section.appearance")))
         root.addSpacing(4)
 
         self._lang_combo = NoWheelComboBox()
@@ -206,25 +206,20 @@ class SettingsDialog(QDialog):
         for name in sorted(tm.list_themes().keys()):
             self._theme_combo.addItem(name.capitalize(), name)
 
-        # Theme action buttons: import + open folder
-        _theme_btn_style = (
-            "QPushButton { background-color: #0077b6; "
-            "border: 1px solid #005a8a; border-radius: 6px; "
-            "color: white; font-size: 15px; font-weight: bold; }"
-            "QPushButton:hover { background-color: #0088cc; "
-            "border-color: #0077b6; }"
-            "QPushButton:pressed { background-color: #005a8a; }"
-        )
-        self._theme_import_btn = QPushButton("+")
-        self._theme_import_btn.setFixedSize(36, 32)
-        self._theme_import_btn.setStyleSheet(_theme_btn_style)
-        self._theme_import_btn.setToolTip("Import theme (.qss)")
+        # Theme actions inherit the shared component theme; no inline colors.
+        from src.ui.icons import icon as svg_icon
+        self._theme_import_btn = QPushButton()
+        self._theme_import_btn.setObjectName("settingsThemeActionBtn")
+        self._theme_import_btn.setFixedSize(36, 36)
+        self._theme_import_btn.setIcon(svg_icon("plus", tm.get_colors()["muted"], 16))
+        self._theme_import_btn.setToolTip(tr("settings.theme.import"))
         self._theme_import_btn.clicked.connect(self._on_import_theme)
 
-        self._theme_folder_btn = QPushButton("☰")
-        self._theme_folder_btn.setFixedSize(36, 32)
-        self._theme_folder_btn.setStyleSheet(_theme_btn_style)
-        self._theme_folder_btn.setToolTip("Open themes folder")
+        self._theme_folder_btn = QPushButton()
+        self._theme_folder_btn.setObjectName("settingsThemeActionBtn")
+        self._theme_folder_btn.setFixedSize(36, 36)
+        self._theme_folder_btn.setIcon(svg_icon("folder", tm.get_colors()["muted"], 16))
+        self._theme_folder_btn.setToolTip(tr("settings.theme.open_folder"))
         self._theme_folder_btn.clicked.connect(self._on_open_theme_folder)
 
         app_card, app_vl = self._make_group()
@@ -270,10 +265,10 @@ class SettingsDialog(QDialog):
         root.addSpacing(14)
 
         # ── UPDATES ───────────────────────────────────────────────────
-        root.addWidget(self._section_header("更新"))
+        root.addWidget(self._section_header(tr("settings.section.updates")))
         root.addSpacing(4)
 
-        self._update_btn = QPushButton("Auf Updates prüfen")
+        self._update_btn = QPushButton(tr("settings.check_updates"))
         self._update_btn.setObjectName("settingsActionBtn")
         self._update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._update_btn.setFixedWidth(340)
@@ -289,11 +284,11 @@ class SettingsDialog(QDialog):
 
         upd_card, upd_vl = self._make_group()
         upd_vl.addWidget(self._row_action(
-            self._update_btn, "Manuell nach neuen Versionen auf GitHub suchen"
+            self._update_btn, tr("settings.updates.hint")
         ))
         upd_vl.addWidget(self._inner_sep())
         upd_vl.addWidget(self._row_action(
-            self._create_shortcut_btn, "Desktop-Verknüpfung direkt auf dem Desktop erstellen"
+            self._create_shortcut_btn, tr("settings.create_shortcut.hint")
         ))
         root.addWidget(upd_card)
         root.addSpacing(14)
@@ -414,7 +409,7 @@ class SettingsDialog(QDialog):
         ))
         tools_vl.addWidget(self._inner_sep())
         tools_vl.addWidget(self._row_action(
-            self._restart_explorer_btn, "Windows Explorer neu starten"
+            self._restart_explorer_btn, tr("settings.restart_explorer_hint")
         ))
         self._tools_widget.setVisible(False)
         dev_vl.addWidget(self._tools_widget)
@@ -511,7 +506,7 @@ class SettingsDialog(QDialog):
 
     def _on_restart_explorer(self):
         SSHFSController.restart_explorer()
-        StyledMessageBox.information(self, "Explorer", tr("settings.explorer_restarted"))
+        StyledMessageBox.information(self, tr("settings.restart_explorer"), tr("settings.explorer_restarted"))
 
     def _on_create_shortcut(self):
         reply = StyledMessageBox.question(
@@ -596,7 +591,7 @@ class SettingsDialog(QDialog):
             pythoncom.CoUninitialize()
 
     def _on_check_updates(self):
-        self._update_btn.setText("Prüfe... ⏳")
+        self._update_btn.setText(tr("settings.check_updates_running"))
         self._update_btn.setEnabled(False)
         QApplication.processEvents()
 
@@ -605,8 +600,8 @@ class SettingsDialog(QDialog):
             from src.updater import UpdaterManager
             from src.ui.dialogs.update_dialog import run_update_dialog, run_pending_update_dialog
         except Exception as e:
-            StyledMessageBox.warning(self, "Fehler", f"Fehler bei der Update-Prüfung: {e}")
-            self._update_btn.setText("Auf Updates prüfen")
+            StyledMessageBox.warning(self, tr("dialog.error"), tr("settings.update.failed", error=e))
+            self._update_btn.setText(tr("settings.check_updates"))
             self._update_btn.setEnabled(True)
             return
 
@@ -614,7 +609,7 @@ class SettingsDialog(QDialog):
         self._update_mgr = updater  # keep alive
 
         def _reset():
-            self._update_btn.setText("Auf Updates prüfen")
+            self._update_btn.setText(tr("settings.check_updates"))
             self._update_btn.setEnabled(True)
 
         def _on_update_available(version: str, changelog: str, download_url: str, obj_type: str):
@@ -626,12 +621,12 @@ class SettingsDialog(QDialog):
         def _on_no_update():
             # An installer may already be waiting on disk (downloaded earlier).
             if not run_pending_update_dialog(self, updater):
-                StyledMessageBox.information(self, "Update", "Du bist auf dem neuesten Stand!")
+                StyledMessageBox.information(self, tr("update.window_title"), tr("settings.update.current"))
             _reset()
 
         def _on_failed(msg: str):
             if not run_pending_update_dialog(self, updater):
-                StyledMessageBox.warning(self, "Fehler", f"Fehler bei der Update-Prüfung: {msg}")
+                StyledMessageBox.warning(self, tr("dialog.error"), tr("settings.update.failed", error=msg))
             _reset()
 
         updater.update_available.connect(_on_update_available)
@@ -645,7 +640,7 @@ class SettingsDialog(QDialog):
             import os
             path = self._putty_path_edit.text().strip()
             if not path:
-                StyledMessageBox.warning(self, "PuTTY", tr("settings.putty_missing"))
+                StyledMessageBox.warning(self, tr("dialog.warning"), tr("settings.putty_missing"))
                 return
             if not os.path.exists(path):
                 reply = StyledMessageBox.question(
@@ -720,7 +715,7 @@ class SettingsDialog(QDialog):
         from PyQt6.QtWidgets import QFileDialog
         from src.theme_manager import get_theme_manager
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Import Theme", "", "QSS Theme Files (*.qss);;All Files (*)"
+            self, tr("settings.theme.import_title"), "", "QSS theme files (*.qss);;All files (*)"
         )
         if file_path:
             tm = get_theme_manager()

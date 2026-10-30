@@ -6,11 +6,11 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QLabel, QPushButton, QHBoxLayout,
     QScrollArea, QWidget, QFrame, QApplication
 )
-from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtCore import Qt, QUrl, QSize
 from PyQt6.QtGui import QIcon, QPixmap, QDesktopServices
 
 import os
-from src.channel import display_name, display_version
+from src.channel import display_version
 from src.ui.dialog_utils import match_parent_height
 from src.ui.frameless_dialog import FramelessDialog
 from src.ui.widgets.no_wheel import NoWheelScrollArea
@@ -40,13 +40,17 @@ def _open(url: str):
     QDesktopServices.openUrl(QUrl(url))
 
 
-def _link_btn(label: str, url: str, icon_char: str = "", obj_name: str = "") -> QPushButton:
-    """Gleichgestalteter Link-Button für alle Sektionen."""
-    text = f"{icon_char}  {label}" if icon_char else label
-    btn = QPushButton(text)
+def _link_btn(label: str, url: str, icon_name: str = "", obj_name: str = "") -> QPushButton:
+    """Shared link action with the product's line-icon vocabulary."""
+    btn = QPushButton(label)
     btn.setObjectName(obj_name or "aboutLinkBtn")
+    if icon_name:
+        from src.theme_manager import get_theme_manager
+        from src.ui.icons import icon as svg_icon
+        btn.setIcon(svg_icon(icon_name, get_theme_manager().get_colors()["muted"], 15))
+        btn.setIconSize(QSize(16, 16))
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
-    btn.setFixedHeight(34)
+    btn.setMinimumHeight(38)
     btn.clicked.connect(lambda: _open(url))
     return btn
 
@@ -141,7 +145,7 @@ class AboutDialog(FramelessDialog):
             icon_lbl.setPixmap(svg_pixmap("cloud", "#00b4d8", 64))
         hero_l.addWidget(icon_lbl)
 
-        title_lbl = QLabel(display_name())
+        title_lbl = QLabel(tr("app.title"))
         title_lbl.setObjectName("dialogTitle")
         title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hero_l.addWidget(title_lbl)
@@ -188,8 +192,8 @@ class AboutDialog(FramelessDialog):
         # Row 1: Docs + GitHub (current project)
         proj_btns = QHBoxLayout()
         proj_btns.setSpacing(8)
-        db = _link_btn(tr("about.docs.btn"),   _URL_PROJECT_DOCS,   "📄", "aboutDocsBtn")
-        gb = _link_btn(tr("about.github.btn"), _URL_PROJECT_GITHUB, "⌨", "aboutGithubBtn")
+        db = _link_btn(tr("about.docs.btn"), _URL_PROJECT_DOCS, "folder", "aboutDocsBtn")
+        gb = _link_btn(tr("about.github.btn"), _URL_PROJECT_GITHUB, "code", "aboutGithubBtn")
         for btn in (db, gb):
             proj_btns.addWidget(btn, stretch=1)
         proj_l.addLayout(proj_btns)
@@ -206,8 +210,8 @@ class AboutDialog(FramelessDialog):
 
         auth_btns = QHBoxLayout()
         auth_btns.setSpacing(8)
-        jacob_btn = _link_btn("Jacob", _URL_CURRENT_AUTHOR_GH, "👤", "aboutAuthorBtn")
-        agb = _link_btn("GitHub (JacobCodeShow)", _URL_CURRENT_AUTHOR_GH, "⌨", "aboutGithubBtn")
+        jacob_btn = _link_btn("Jacob", _URL_CURRENT_AUTHOR_GH, "users", "aboutAuthorBtn")
+        agb = _link_btn("GitHub (JacobCodeShow)", _URL_CURRENT_AUTHOR_GH, "code", "aboutGithubBtn")
         auth_btns.addWidget(jacob_btn, stretch=1)
         auth_btns.addWidget(agb, stretch=1)
         proj_l.addLayout(auth_btns)
@@ -217,7 +221,7 @@ class AboutDialog(FramelessDialog):
         # ── Based on original project ─────────────────────────────────────
         orig_card, orig_l = _card()
 
-        based_lbl = _section_label("基于原项目 / Based on")
+        based_lbl = _section_label(tr("about.based_on"))
         orig_l.addWidget(based_lbl)
         orig_l.addWidget(_divider())
         based_desc = QLabel("NEO SSH-Win Manager")
@@ -227,22 +231,22 @@ class AboutDialog(FramelessDialog):
 
         orig_btns = QHBoxLayout()
         orig_btns.setSpacing(8)
-        oweb = _link_btn("官网", _URL_ORIG_PROJECT_WEB, "🌐", "aboutWebBtn")
-        odoc = _link_btn("文档", _URL_ORIG_PROJECT_DOCS, "📄", "aboutDocsBtn")
-        ogit = _link_btn("GitHub", _URL_ORIG_PROJECT_GH, "⌨", "aboutGithubBtn")
+        oweb = _link_btn(tr("about.original.website"), _URL_ORIG_PROJECT_WEB, "globe", "aboutWebBtn")
+        odoc = _link_btn(tr("about.original.docs"), _URL_ORIG_PROJECT_DOCS, "folder", "aboutDocsBtn")
+        ogit = _link_btn(tr("about.original.github"), _URL_ORIG_PROJECT_GH, "code", "aboutGithubBtn")
         for btn in (oweb, odoc, ogit):
             orig_btns.addWidget(btn, stretch=1)
         orig_l.addLayout(orig_btns)
 
         orig_l.addWidget(_divider())
 
-        contrib_lbl = _section_label("原作者 / Original authors")
+        contrib_lbl = _section_label(tr("about.other.devs"))
         orig_l.addWidget(contrib_lbl)
 
         contrib_row = QHBoxLayout()
         contrib_row.setSpacing(8)
-        gk_btn = _link_btn("Gregor Krebs", _URL_ORIG_AUTHOR_GH, "⌨", "aboutGithubBtn")
-        d53_btn = _link_btn("Den4ik53", _URL_CONTRIB_GITHUB, "⌨", "aboutGithubBtn")
+        gk_btn = _link_btn("Gregor Krebs", _URL_ORIG_AUTHOR_GH, "code", "aboutGithubBtn")
+        d53_btn = _link_btn("Den4ik53", _URL_CONTRIB_GITHUB, "code", "aboutGithubBtn")
         contrib_row.addWidget(gk_btn, stretch=1)
         contrib_row.addWidget(d53_btn, stretch=1)
         orig_l.addLayout(contrib_row)

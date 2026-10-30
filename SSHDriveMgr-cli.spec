@@ -9,15 +9,15 @@
 # analysis can't see that distinction and used to bundle PyQt6 anyway
 # (~34 MB: Qt6Core + the software-OpenGL renderer); excluding it here is what
 # keeps the CLI EXE small.
-# No datas are needed: src bytecode is in the PYZ, and the CLI chain never
-# reads translations/*.json or version.txt from disk.
+# Keep only the tiny version resource for independent release validation.
+# Runtime source bytecode is in the PYZ; no translations or GUI assets are needed.
 
 
 a = Analysis(
     ['cli_main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('src/version.txt', 'src')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

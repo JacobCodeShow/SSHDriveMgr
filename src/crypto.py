@@ -66,6 +66,10 @@ _PBKDF2_ITERATIONS = 600_000
 _PBKDF2_HASH = "sha256"
 _KEY_LEN = 32  # 256 bit
 
+# Login verifiers must never be usable as historical PBKDF2 AES wrapping keys.
+_PASSWORD_VERIFIER_PREFIX = "v2$"
+_PASSWORD_VERIFIER_DOMAIN = b"SSHDriveMgr/password-verifier/v2\x00"
+
 # Argon2id parameters (memory-hard, GPU-resistant)
 _ARGON2_MEMORY_COST = 65536  # 64 MB
 _ARGON2_TIME_COST = 3
@@ -80,34 +84,47 @@ _KEYRING_USERNAME = "master_encryption_key"
 # Passwort-Hashing (für App-Login)
 # ------------------------------------------------------------------
 
+def upgrade_legacy_password_hash(hash_hex: str) -> str:
+    """One-way conversion of a raw legacy verifier, without the password.
+
+    This changes only the login verifier, never the salt or wrapped key. Older
+    backups containing raw PBKDF2 verifiers remain exposed and must be protected.
+    """
+    if (not isinstance(hash_hex, str) or len(hash_hex) != _KEY_LEN * 2
+            or any(c not in "0123456789abcdefABCDEF" for c in hash_hex)):
+        raise ValueError("Invalid legacy password verifier")
+    digest = hashlib.sha256(
+        _PASSWORD_VERIFIER_DOMAIN + bytes.fromhex(hash_hex)
+    ).hexdigest()
+    return _PASSWORD_VERIFIER_PREFIX + digest
+
+
 def hash_password(password: str) -> Tuple[str, str]:
-    """
-    Erzeugt einen sicheren Hash des App-Passworts.
-    Returns (hash_hex, salt_hex).
-    """
-    salt = secrets.token_bytes(32)
-    pw_hash = hashlib.pbkdf2_hmac(
-        _PBKDF2_HASH,
-        password.encode("utf-8"),
-        salt,
-        _PBKDF2_ITERATIONS,
-        dklen=_KEY_LEN,
-    )
-    return pw_hash.hex(), salt.hex()
+    """Return (versioned login verifier, salt_hex), not a wrapping key."""
+    salt_hex = secrets.token_bytes(32).hex()
+    return upgrade_legacy_password_hash(derive_key(password, salt_hex).hex()), salt_hex
 
 
 def verify_password(password: str, hash_hex: str, salt_hex: str) -> bool:
-    """Prüft ob ein Passwort mit dem gespeicherten Hash übereinstimmt."""
-    salt = bytes.fromhex(salt_hex)
-    expected = bytes.fromhex(hash_hex)
-    actual = hashlib.pbkdf2_hmac(
-        _PBKDF2_HASH,
-        password.encode("utf-8"),
-        salt,
-        _PBKDF2_ITERATIONS,
-        dklen=_KEY_LEN,
-    )
-    # Timing-safe Vergleich
+    """Verify v2 credentials or strict raw-hex legacy/imported credentials.
+
+    Unknown versions and malformed records fail closed. Legacy fallback is
+    needed for older backups; init_db upgrades all raw records before login.
+    """
+    if not all(isinstance(value, str) for value in (password, hash_hex, salt_hex)):
+        return False
+    versioned = hash_hex.startswith(_PASSWORD_VERIFIER_PREFIX)
+    digest_hex = hash_hex[len(_PASSWORD_VERIFIER_PREFIX):] if versioned else hash_hex
+    if (len(digest_hex) != _KEY_LEN * 2
+            or any(c not in "0123456789abcdefABCDEF" for c in digest_hex)):
+        return False
+    try:
+        expected = bytes.fromhex(digest_hex)
+        actual = derive_key(password, salt_hex)
+    except (ValueError, TypeError, UnicodeError):
+        return False
+    if versioned:
+        actual = hashlib.sha256(_PASSWORD_VERIFIER_DOMAIN + actual).digest()
     return hmac.compare_digest(actual, expected)
 
 
@@ -115,6 +132,8 @@ def derive_key(password: str, salt_hex: str) -> bytes:
     """
     Leitet einen 256-bit Schlüssel aus dem Passwort ab.
     Wird genutzt um den Encryption Key des Benutzers zu ver-/entschlüsseln.
+    Legacy wrapping format: keep this derivation unchanged. Never derive a
+    wrapping key from the stored (domain-separated) login verifier.
     """
     salt = bytes.fromhex(salt_hex)
     return hashlib.pbkdf2_hmac(

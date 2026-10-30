@@ -875,7 +875,7 @@ QPushButton#sidebarBtn[btn_type="warning"]:hover {
 
 /* ---- Small Add button in header --------------------------- */
 QPushButton#headerAddBtn {
-    background-color: 14141F;
+    background-color: #141e2e;
     border: 1px solid #243243;
     border-radius: 10px;
     min-width: 32px;

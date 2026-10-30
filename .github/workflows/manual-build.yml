@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing release tag to upload assets to, for example v1.0.0
+        description: Existing release tag supporting the explicit-mode build API, for example v1.4.0
         required: true
         type: string
 
@@ -12,16 +12,45 @@ permissions:
   contents: write
 
 concurrency:
-  group: manual-build-${{ github.event.inputs.tag || github.ref }}
+  group: release-${{ github.event.inputs.tag }}
   cancel-in-progress: false
 
 jobs:
   build-windows-release:
     runs-on: windows-latest
-
+    env:
+      RELEASE_TAG: ${{ github.event.inputs.tag }}
     steps:
-      - name: Check out repository
+      - name: Checkout requested tag
         uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ github.event.inputs.tag }}
+          fetch-depth: 0
+
+      - name: Validate tag and source version
+        shell: pwsh
+        run: |
+          $version = (Get-Content src/version.txt -Raw -Encoding UTF8).Trim()
+          if ($version -notmatch '^\d+\.\d+\.\d+$' -or $env:RELEASE_TAG -cne "v$version") { throw 'Tag does not match src/version.txt' }
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve checkout HEAD' }
+          $tagCommit = git rev-parse "refs/tags/$($env:RELEASE_TAG)^{commit}"
+          if ($LASTEXITCODE -ne 0 -or $head -ne $tagCommit) { throw 'Checkout is not the requested tag commit' }
+          # Parse declared parameters only; never execute a tag's build scripts here.
+          $interfaceError = 'tag predates explicit-mode build interface; use a compatible workflow or publish a new tag'
+          $contracts = @{
+            'build_dual.ps1' = @{ Mode = [string]; SkipStartupCheck = [switch] }
+            'installer/build_installer.ps1' = @{ SkipBuild = [switch] }
+          }
+          foreach ($scriptPath in $contracts.Keys) {
+            $tokens = $null; $parseErrors = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD $scriptPath), [ref]$tokens, [ref]$parseErrors)
+            if ($parseErrors.Count -gt 0 -or $null -eq $ast.ParamBlock) { throw $interfaceError }
+            foreach ($parameterName in $contracts[$scriptPath].Keys) {
+              $declared = @($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq $parameterName })
+              if ($declared.Count -ne 1 -or $declared[0].StaticType -ne $contracts[$scriptPath][$parameterName]) { throw $interfaceError }
+            }
+          }
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -33,46 +62,72 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
+          if ($LASTEXITCODE -ne 0) { throw 'pip upgrade failed' }
+          python -m pip install -r requirements.txt pyinstaller pytest
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
 
       - name: Run tests
         shell: pwsh
-        run: python -m pytest tests -q
+        run: |
+          python -m pytest tests -q
+          if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
 
-      - name: Sync version
+      - name: Build executables
         shell: pwsh
-        run: .\scripts\sync_version.ps1
-
-      - name: Build release executables
-        shell: pwsh
-        run: .\build_dual.ps1 -OneDir
+        # Headless CI skips launch checks that require a visible Login window.
+        # pytest/version validation still run; local builds keep default startup checks.
+        run: .\build_dual.ps1 all -SkipStartupCheck
 
       - name: Package onedir build as zip
         shell: pwsh
         run: |
           $version = (Get-Content src/version.txt -Raw).Trim()
           $zip = "dist/SSHDriveMgr-onedir-$version.zip"
-          if (Test-Path $zip) { Remove-Item $zip -Force }
-          # -Path ".../*" zips the folder CONTENTS at the archive root, so
-          # extracting produces SSHDriveMgr.exe + _internal\ directly.
-          Compress-Archive -Path "dist/SSHDriveMgr-onedir/*" -DestinationPath $zip -CompressionLevel Optimal
-          $mb = [math]::Round((Get-Item $zip).Length/1MB, 1)
-          Write-Host "Created $zip ($mb MB)"
-          echo "ONEDIR_ZIP=$zip" >> $env:GITHUB_ENV
+          if (Test-Path -LiteralPath $zip) { throw "Unexpected stale archive: $zip" }
+          Compress-Archive -Path 'dist/SSHDriveMgr-onedir/*' -DestinationPath $zip -CompressionLevel Optimal
+          if ((Get-Item -LiteralPath $zip).Length -le 0) { throw 'Empty onedir archive' }
+          "ONEDIR_ZIP=$zip" >> $env:GITHUB_ENV
 
       - name: Install Inno Setup
         shell: pwsh
-        run: choco install innosetup -y
+        run: |
+          choco install innosetup -y
+          if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed' }
 
-      - name: Build Windows installer
+      - name: Build installer
+        shell: pwsh
+        run: .\installer\build_installer.ps1 -SkipBuild
+
+      - name: Validate embedded release versions and generate checksums
         shell: pwsh
         run: |
-          $iscc = Get-ChildItem "C:\Program Files*\Inno Setup 6\ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
-          if (-not $iscc) { $iscc = Get-Command ISCC.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source }
-          if (-not $iscc) { throw "ISCC.exe not found after Inno Setup install" }
-          Write-Host "Using ISCC: $iscc"
-          & $iscc installer\SSHDriveMgr.iss
+          $version = (Get-Content src/version.txt -Raw -Encoding UTF8).Trim()
+          if ($env:RELEASE_TAG -cne "v$version") { throw 'Release tag/version changed during build' }
+          $installer = "dist_installer/SSHDriveMgr-Setup-$version.exe"
+          $executables = @('dist/SSHDriveMgr.exe', 'dist/SSHDriveMgr-cli.exe', 'dist/SSHDriveMgr-onedir/SSHDriveMgr.exe', $installer)
+          foreach ($file in $executables) {
+            $artifact = Get-Item -LiteralPath $file -ErrorAction Stop
+            if ($artifact.Length -le 0 -or $artifact.VersionInfo.ProductVersion -ne $version) { throw "Embedded version mismatch: $file" }
+          }
+          @'
+          from pathlib import Path
+          from PyInstaller.archive.readers import CArchiveReader
+          expected = Path('src/version.txt').read_text(encoding='utf-8').strip()
+          for name in ('SSHDriveMgr.exe', 'SSHDriveMgr-cli.exe'):
+              archive = CArchiveReader(str(Path('dist') / name))
+              keys = [key for key in archive.toc if key.replace('\\', '/') == 'src/version.txt']
+              if len(keys) != 1 or archive.extract(keys[0]).decode('utf-8').strip() != expected:
+                  raise SystemExit(f'Embedded src/version.txt mismatch: {name}')
+          if Path('dist/SSHDriveMgr-onedir/_internal/src/version.txt').read_text(encoding='utf-8').strip() != expected:
+              raise SystemExit('Onedir embedded src/version.txt mismatch')
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Embedded source version validation failed' }
+          $files = @('dist/SSHDriveMgr.exe', 'dist/SSHDriveMgr-cli.exe', $env:ONEDIR_ZIP, $installer)
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $([System.IO.Path]::GetFileName($file))"
+          }
+          $lines | Set-Content -LiteralPath sha256sums.txt -Encoding ascii
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
@@ -83,27 +138,26 @@ jobs:
             dist/SSHDriveMgr-cli.exe
             dist/SSHDriveMgr-onedir-*.zip
             dist_installer/*.exe
+            sha256sums.txt
           if-no-files-found: error
 
-      - name: Upload assets to GitHub release
+      - name: Upload assets to existing GitHub release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
         run: |
-          if (-not $env:RELEASE_TAG) {
-            throw 'No release tag was provided by the event payload.'
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:RELEASE_TAG
+          $version = (Get-Content src/version.txt -Raw -Encoding UTF8).Trim()
+          if ($tag -cne "v$version") { throw 'Refusing to upload a mismatched version/tag' }
+          gh release view $tag --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) { throw 'Requested release does not exist or is inaccessible' }
+          $assets = @('dist/SSHDriveMgr.exe', 'dist/SSHDriveMgr-cli.exe', $env:ONEDIR_ZIP, "dist_installer/SSHDriveMgr-Setup-$version.exe", 'sha256sums.txt')
+          foreach ($asset in $assets) {
+            gh release upload $tag $asset --repo $env:GITHUB_REPOSITORY --clobber
+            if ($LASTEXITCODE -ne 0) {
+              Start-Sleep -Seconds 5
+              gh release upload $tag $asset --repo $env:GITHUB_REPOSITORY --clobber
+              if ($LASTEXITCODE -ne 0) { throw "Asset upload failed after retry: $asset" }
+            }
           }
-
-          $installer = Get-ChildItem dist_installer\*.exe | Select-Object -First 1 -ExpandProperty FullName
-
-          # sha256sums.txt lets the in-app updater verify the installer it
-          # downloads (src/updater.py looks for exactly this asset name).
-          $files = @('.\dist\SSHDriveMgr.exe', '.\dist\SSHDriveMgr-cli.exe', $env:ONEDIR_ZIP, $installer)
-          $lines = foreach ($f in $files) {
-            $h = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
-            "$h  $([System.IO.Path]::GetFileName($f))"
-          }
-          $lines | Out-File -FilePath sha256sums.txt -Encoding ascii
-
-          gh release upload $env:RELEASE_TAG .\dist\SSHDriveMgr.exe .\dist\SSHDriveMgr-cli.exe $env:ONEDIR_ZIP $installer .\sha256sums.txt --repo $env:GITHUB_REPOSITORY --clobber

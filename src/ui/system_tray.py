@@ -7,7 +7,6 @@ from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QAction
 from PyQt6.QtCore import Qt, QSize
 import os
 from src.i18n import tr
-from src.channel import display_name
 
 
 def _create_tray_icon() -> QIcon:
@@ -46,7 +45,7 @@ class SystemTray(QSystemTrayIcon):
         else:
             self.setIcon(QIcon(_create_tray_icon()))
             
-        self.setToolTip(display_name())
+        self.setToolTip(tr("app.title"))
         self._build_menu()
         self.activated.connect(self._on_activated)
 
@@ -61,10 +60,14 @@ class SystemTray(QSystemTrayIcon):
         menu.addSeparator()
 
         quit_act = QAction("✕  " + tr("tray.quit"), self)
-        quit_act.triggered.connect(self._main_window.quit_app)
+        quit_act.triggered.connect(self._quit_and_unmount)
         menu.addAction(quit_act)
 
         self.setContextMenu(menu)
+
+    def _quit_and_unmount(self, _checked: bool = False) -> None:
+        """Ignore QAction.triggered(bool); tray Quit always disconnects mounts."""
+        self._main_window.quit_app(unmount=True)
 
     def _toggle_window(self):
         if self._main_window.isVisible():
@@ -111,7 +114,7 @@ class SystemTray(QSystemTrayIcon):
 
         menu.addSeparator()
         quit_act = QAction("✕  " + tr("tray.quit"), self)
-        quit_act.triggered.connect(self._main_window.quit_app)
+        quit_act.triggered.connect(self._quit_and_unmount)
         menu.addAction(quit_act)
 
     def _on_tray_toggle(self, conn_id: str, is_mounted: bool):

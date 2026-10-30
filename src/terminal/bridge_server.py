@@ -1,21 +1,17 @@
-"""
-WebSocket ↔ Paramiko SSH bridge server for the integrated xterm.js terminal.
+"""Local WebSocket ↔ Paramiko bridge for the integrated terminal.
 
-Security properties:
-- SSH passwords are used only inside paramiko.SSHClient.connect() and wiped afterward.
-- The WebSocket carries only raw terminal I/O (stdin/stdout/stderr); no credentials ever.
-- Session tokens are UUID4, single-use: consumed on first WebSocket connection.
-- Server binds exclusively to 127.0.0.1 on an OS-assigned ephemeral port.
-- Host key verification uses RejectPolicy + TOFU dialog (no AutoAddPolicy).
+Binary WebSocket frames are raw terminal input (UTF-8 from xterm.js). Text
+frames support only explicit resize controls; unrecognized text remains input.
+Host keys are verified by Paramiko, including hashed known_hosts entries, and
+TOFU asks about the exact key negotiated by the connection, never a probe.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
-import shutil
-import subprocess
 import threading
 import time
 import uuid
@@ -27,10 +23,7 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     import paramiko
 
-# Maximum WebSocket message size: 256 KB
 _MAX_WS_MSG_BYTES = 256 * 1024
-
-# Pending tokens expire after 60 seconds if never consumed by a WebSocket connection
 _TOKEN_EXPIRY_SEC = 60.0
 
 
@@ -47,371 +40,402 @@ class TerminalSession:
 class _PendingToken:
     conn_id: str
     created_at: float = field(default_factory=time.monotonic)
+    session: TerminalSession | None = None
 
 
 class TerminalBridgeServer:
-    """
-    Runs an asyncio websockets server in a daemon thread.
+    """An asyncio WebSocket server in a dedicated daemon thread.
 
-    Call start() once after creation, stop() on application exit.
-    All public methods that create/close sessions are called from the Qt main thread
-    and schedule coroutines into self._loop.
+    start() starts the local listener. create_session_token() performs blocking
+    SSH setup and belongs on a worker, not the Qt thread. close_session() and
+    stop() only schedule cleanup and are safe for GUI shutdown. stop() defaults
+    to nonblocking; stop(wait=True, timeout=2.0) or wait_stopped(timeout=2.0)
+    allows a worker to wait a bounded time. Their bool result means ALL server,
+    task, executor and event-loop resources have finished closing, not merely
+    that shutdown was requested. Never call an unbounded join from Qt.
+
+    SSH setup already in progress cannot be forcibly cancelled by stop(); its
+    late result is closed rather than installed. The owner must manage its
+    connection worker's lifetime separately.
     """
 
     def __init__(self):
         self._sessions: dict[str, TerminalSession] = {}
-        self._pending_tokens: dict[str, _PendingToken] = {}  # token → _PendingToken
-        self._port: int = 0
+        self._pending_tokens: dict[str, _PendingToken] = {}
+        self._state_lock = threading.RLock()
+        self._port = 0
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._server = None
-
-        # Qt signal-compatible callback for TOFU host-key dialog.
-        # Set by MainWindow: callable(host, port, fingerprint) → bool (accepted)
+        self._cleanup_task: asyncio.Task | None = None
+        self._stopping = False
+        self._shutdown_complete = False
+        self._stopped = threading.Event()
+        self._stopped.set()
         self.host_key_verify_callback: object | None = None
 
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
-
     def start(self) -> bool:
-        """Start the bridge. Returns True on success, False on failure.
-
-        Previously a failure inside _serve() (e.g. missing `websockets`
-        module or bind failure) left `ready` unset, `start()` would
-        time out 10 s later with no error surfaced, and self._loop was
-        never run_forever() — leaving the bridge in a broken half-init
-        state. We now capture the exception in the worker thread and
-        surface it to the caller.
-        """
-        self._loop = asyncio.new_event_loop()
+        """Start once; return False on import, bind or startup failure."""
+        with self._state_lock:
+            if self._thread is not None or self._stopping:
+                return False
+            loop = asyncio.new_event_loop()
+            self._loop = loop
+            self._stopped.clear()
         ready = threading.Event()
-        # Exception container shared with the worker thread; set when
-        # _serve() raises before ready can be signalled.
-        start_error: list = []
+        start_error = []
 
         def _run():
-            asyncio.set_event_loop(self._loop)
+            asyncio.set_event_loop(loop)
             try:
-                self._loop.run_until_complete(self._serve(ready))
+                loop.run_until_complete(self._serve(ready))
+                loop.run_forever()
             except Exception as exc:
                 start_error.append(exc)
-                ready.set()  # unblock start() so it can report the error
-                return
-            self._loop.run_forever()
+                logger.exception("Terminal bridge failed")
+            finally:
+                # Prevent a concurrent stop() from scheduling a second shutdown
+                # while startup failure cleanup is already taking ownership.
+                with self._state_lock:
+                    self._stopping = True
+                ready.set()
+                try:
+                    loop.run_until_complete(self._shutdown())
+                    loop.run_until_complete(loop.shutdown_asyncgens())
+                    # Closing channels makes select/recv workers exit. Await them
+                    # before closing the loop, rather than abandoning executor threads.
+                    loop.run_until_complete(loop.shutdown_default_executor())
+                finally:
+                    loop.close()
+                    self._port = 0
+                    self._stopped.set()
 
         self._thread = threading.Thread(target=_run, daemon=True, name="TerminalBridge")
         self._thread.start()
         ready.wait(timeout=10)
-        if start_error:
-            exc = start_error[0]
-            logger.error("Terminal bridge failed to start: %s", exc)
-            self._loop = None
-            return False
-        if self._port == 0:
-            # ready was never set (timeout) and no exception captured.
-            logger.error("Terminal bridge failed to start: timed out")
-            self._loop = None
+        if start_error or not self._port:
+            logger.error("Terminal bridge failed to start: %s", start_error or "timed out")
+            self.stop()
             return False
         return True
 
-    def stop(self):
-        if self._loop is None:
-            return
-        # Close SSH channels synchronously first so _recv_channel executor
-        # threads unblock (select timeout is 0.2 s) before the loop stops.
-        for session in list(self._sessions.values()):
+    def stop(self, wait: bool = False, timeout: float = 2.0) -> bool:
+        """Request complete cleanup without blocking by default.
+
+        With wait=True, wait at most timeout seconds; False means cleanup is
+        still running. Repeated calls are safe. No SSH/network work runs on the
+        calling thread. See wait_stopped() for a later bounded completion wait.
+        """
+        with self._state_lock:
+            first_request = not self._stopping
+            self._stopping = True
+            loop = self._loop
+        if first_request and loop is not None and not loop.is_closed():
             try:
-                session.channel.close()
-            except Exception:
-                pass
-            try:
-                session.client.close()
-            except Exception:
-                pass
-        self._sessions.clear()
-        self._loop.call_soon_threadsafe(self._loop.stop)
+                loop.call_soon_threadsafe(lambda: asyncio.create_task(self._shutdown_and_stop()))
+            except RuntimeError:
+                pass  # The worker already completed its finally cleanup.
+        if wait:
+            return self.wait_stopped(timeout)
+        thread = self._thread
+        return self._stopped.is_set() and (thread is None or not thread.is_alive())
+
+    def wait_stopped(self, timeout: float = 2.0) -> bool:
+        """Wait at most timeout seconds for shutdown; never joins itself."""
+        thread = self._thread
+        if thread is threading.current_thread():
+            return False
+        if thread is not None:
+            thread.join(timeout=max(0.0, timeout))
+            return not thread.is_alive() and self._stopped.is_set()
+        return self._stopped.is_set()
 
     @property
     def port(self) -> int:
         return self._port
 
-    # ------------------------------------------------------------------
-    # Session management (called from Qt main thread)
-    # ------------------------------------------------------------------
-
     def create_session_token(self, conn_id: str, conn) -> str | None:
-        """
-        Opens an SSH connection using conn's credentials and returns a single-use
-        WebSocket token. Returns None on connection failure.
+        """Blocking SSH setup; return a single-use token or None.
 
-        conn is a Connection dataclass with fields:
-          host, port, user (ssh_user), auth_method, password, key_path, putty_key_path
+        Safe to run on a worker. If shutdown wins the race, the newly connected
+        client/channel is closed here and no usable token is returned.
         """
         import paramiko
 
+        with self._state_lock:
+            if self._stopping:
+                return None
         host = conn.host or ""
         port = int(conn.port or 22)
         user = getattr(conn, "user", "") or getattr(conn, "ssh_user", "") or ""
         auth_method = getattr(conn, "auth_method", "password")
         password = getattr(conn, "password", "") or ""
         key_path = getattr(conn, "key_path", "") or ""
-
         known_hosts_path = os.path.expanduser(r"~\.ssh\known_hosts")
-
         client = paramiko.SSHClient()
-
-        # Check if host is already known
-        if _is_host_known(host, port, known_hosts_path):
-            client.set_missing_host_key_policy(paramiko.RejectPolicy())
-            client.load_host_keys(known_hosts_path)
-        else:
-            # Unknown host: ask user via TOFU callback
-            fingerprint = _get_server_fingerprint(host, port)
-            accepted = False
-            if self.host_key_verify_callback and fingerprint:
-                accepted = self.host_key_verify_callback(host, port, fingerprint)
-            if not accepted:
-                logger.warning("Terminal: TOFU rejected for %s:%d", host, port)
-                return None
-            # Accept and save to known_hosts
-            policy = _TOFUAcceptPolicy(known_hosts_path)
-            client.set_missing_host_key_policy(policy)
-
+        channel = None
         try:
+            # Always load the whole file. Pre-detection with ssh-keygen/plain
+            # scans misses hashed pins when OpenSSH isn't installed, enabling
+            # an unsafe TOFU prompt for an already-known changed key.
+            if os.path.exists(known_hosts_path):
+                client.load_host_keys(known_hosts_path)
+            if callable(self.host_key_verify_callback):
+                client.set_missing_host_key_policy(
+                    _TOFUAcceptPolicy(known_hosts_path, host, port, self.host_key_verify_callback)
+                )
+            else:
+                client.set_missing_host_key_policy(paramiko.RejectPolicy())
             if auth_method == "key" and key_path:
                 client.connect(host, port=port, username=user, key_filename=key_path, timeout=15)
             elif auth_method == "key" and getattr(conn, "putty_key_path", ""):
-                # PPK keys: paramiko can load them if they are OpenSSH-compatible
-                # (PPK v2/v3 format). Try key_path first, fallback to putty_key_path.
-                ppk_path = conn.putty_key_path
-                client.connect(host, port=port, username=user, key_filename=ppk_path, timeout=15)
+                client.connect(host, port=port, username=user,
+                               key_filename=conn.putty_key_path, timeout=15)
             elif auth_method in ("password", "ask") and password:
                 client.connect(host, port=port, username=user, password=password, timeout=15)
             else:
-                logger.error("Terminal: unsupported auth_method=%s or missing credentials", auth_method)
-                client.close()
-                return None
-        except paramiko.AuthenticationException as e:
-            logger.error("Terminal: authentication failed for %s@%s:%d – %s", user, host, port, e)
-            client.close()
-            return None
-        except Exception as e:
-            logger.error("Terminal: SSH connect error for %s:%d – %s", host, port, e)
+                raise ValueError("unsupported authentication method or missing credentials")
+            channel = client.invoke_shell(term="xterm-256color", width=80, height=24)
+            channel.setblocking(False)
+            transport = client.get_transport()
+            if transport:
+                transport.set_keepalive(30)
+        except Exception as exc:
+            logger.error("Terminal: SSH setup error for %s:%d – %s", host, port, exc)
+            if channel is not None:
+                channel.close()
             client.close()
             return None
         finally:
-            # Wipe password from local scope regardless of success/failure
             password = ""
 
-        channel = client.invoke_shell(term="xterm-256color", width=80, height=24)
-        channel.setblocking(False)
-
-        # Keepalive every 30 s — prevents server-side idle disconnect regardless of data flow
-        transport = client.get_transport()
-        if transport:
-            transport.set_keepalive(30)
-
         session = TerminalSession(conn_id=conn_id, client=client, channel=channel)
-        self._sessions[conn_id] = session
-
         token = str(uuid.uuid4())
-        self._pending_tokens[token] = _PendingToken(conn_id=conn_id)
-        logger.debug("Terminal: session created for %s, token %s", conn_id, token[:8] + "…")
+        with self._state_lock:
+            if self._stopping:
+                channel.close()
+                client.close()
+                return None
+            previous = self._sessions.get(conn_id)
+            self._sessions[conn_id] = session
+            self._pending_tokens[token] = _PendingToken(conn_id=conn_id, session=session)
+        if previous is not None:
+            self._schedule_close(conn_id, previous)
+        logger.debug("Terminal: session created for %s", conn_id)
         return token
 
+    def _schedule_close(self, conn_id, expected=None):
+        loop = self._loop
+        if loop is not None and not loop.is_closed():
+            try:
+                loop.call_soon_threadsafe(
+                    lambda: asyncio.create_task(self._close_session_async(conn_id, expected))
+                )
+            except RuntimeError:
+                pass
+
     def close_session(self, conn_id: str):
-        if self._loop and not self._loop.is_closed():
-            self._loop.call_soon_threadsafe(
-                lambda: asyncio.ensure_future(self._close_session_async(conn_id), loop=self._loop)
-            )
+        """Schedule session/channel/client/WebSocket cleanup; does not wait."""
+        self._schedule_close(conn_id)
 
     def resize_session(self, conn_id: str, cols: int, rows: int):
-        session = self._sessions.get(conn_id)
-        if session and session.channel and not session.channel.closed:
+        with self._state_lock:
+            session = self._sessions.get(conn_id)
+        if session and not session.channel.closed and cols > 0 and rows > 0:
             try:
                 session.channel.resize_pty(width=cols, height=rows)
-            except Exception as e:
-                logger.debug("Terminal: resize error for %s: %s", conn_id, e)
+            except Exception as exc:
+                logger.debug("Terminal: resize error for %s: %s", conn_id, exc)
 
     def is_session_alive(self, conn_id: str) -> bool:
-        session = self._sessions.get(conn_id)
-        if session is None:
-            return False
-        return not session.channel.closed
-
-
-    # ------------------------------------------------------------------
-    # Internal asyncio coroutines
-    # ------------------------------------------------------------------
+        with self._state_lock:
+            session = self._sessions.get(conn_id)
+        return session is not None and not session.channel.closed
 
     async def _serve(self, ready_event: threading.Event):
-        import websockets
+        # Explicit legacy API: websockets 13+ also exposes a different one-arg
+        # handler API. The frontend URL remains /ws/{single-use-token}.
+        from websockets.legacy.server import serve
 
-        server = await websockets.serve(
-            self._ws_handler,
-            "127.0.0.1",
-            0,
-            max_size=_MAX_WS_MSG_BYTES,
-            ping_interval=30,
-            ping_timeout=10,
+        self._server = await serve(
+            self._ws_handler, "127.0.0.1", 0, max_size=_MAX_WS_MSG_BYTES,
+            ping_interval=30, ping_timeout=10, close_timeout=1,
         )
-        self._server = server
-        self._port = server.sockets[0].getsockname()[1]
-        logger.info("Terminal bridge listening on 127.0.0.1:%d", self._port)
+        self._port = self._server.sockets[0].getsockname()[1]
+        self._cleanup_task = asyncio.create_task(self._cleanup_expired_tokens())
         ready_event.set()
-        # Start periodic cleanup of expired pending tokens
-        asyncio.ensure_future(self._cleanup_expired_tokens())
+
+    async def _shutdown_and_stop(self):
+        try:
+            await self._shutdown()
+        finally:
+            asyncio.get_running_loop().call_soon(asyncio.get_running_loop().stop)
+
+    async def _shutdown(self):
+        if self._shutdown_complete:
+            return
+        with self._state_lock:
+            self._stopping = True
+            sessions = list(self._sessions.values())
+        if self._server is not None:
+            self._server.close()
+        if self._cleanup_task is not None:
+            self._cleanup_task.cancel()
+            await asyncio.gather(self._cleanup_task, return_exceptions=True)
+        await asyncio.gather(
+            *(self._close_session_async(s.conn_id, s) for s in sessions),
+            return_exceptions=True,
+        )
+        if self._server is not None:
+            await self._server.wait_closed()
+        # Include in-flight handlers/forwarders and scheduled close operations.
+        remaining = [t for t in asyncio.all_tasks()
+                     if t is not asyncio.current_task() and not t.done()]
+        for task in remaining:
+            task.cancel()
+        await asyncio.gather(*remaining, return_exceptions=True)
+        with self._state_lock:
+            self._pending_tokens.clear()
+        self._shutdown_complete = True
+
+    async def _expire_pending_tokens(self):
+        now = time.monotonic()
+        with self._state_lock:
+            expired = [self._pending_tokens.pop(token)
+                       for token, pt in list(self._pending_tokens.items())
+                       if now - pt.created_at > _TOKEN_EXPIRY_SEC]
+        for pending in expired:
+            await self._close_session_async(pending.conn_id, pending.session)
 
     async def _cleanup_expired_tokens(self):
-        """Periodically remove pending tokens that were never consumed, closing
-        the associated SSH connection to avoid resource leaks."""
         while True:
             await asyncio.sleep(30)
-            now = time.monotonic()
-            expired = [
-                token for token, pt in list(self._pending_tokens.items())
-                if now - pt.created_at > _TOKEN_EXPIRY_SEC
-            ]
-            for token in expired:
-                pt = self._pending_tokens.pop(token, None)
-                if pt:
-                    logger.info("Terminal: expiring unused token for conn_id=%s", pt.conn_id)
-                    session = self._sessions.pop(pt.conn_id, None)
-                    if session:
-                        try:
-                            session.channel.close()
-                        except Exception:
-                            pass
-                        try:
-                            session.client.close()
-                        except Exception:
-                            pass
+            await self._expire_pending_tokens()
 
     async def _ws_handler(self, websocket, path: str):
-        import websockets
-
-        # Extract token from path: /ws/{token}
         parts = path.strip("/").split("/")
         if len(parts) != 2 or parts[0] != "ws":
             await websocket.close(1008, "Invalid path")
             return
-
-        token = parts[1]
-        pending = self._pending_tokens.pop(token, None)
+        with self._state_lock:
+            pending = self._pending_tokens.pop(parts[1], None)
         if pending is None:
-            logger.warning("Terminal: unknown or already-used token %s", token[:8] + "…")
             await websocket.close(1008, "Invalid token")
             return
-        # Check token has not expired (belt-and-suspenders alongside cleanup task)
         if time.monotonic() - pending.created_at > _TOKEN_EXPIRY_SEC:
-            logger.warning("Terminal: expired token rejected for conn_id=%s", pending.conn_id)
+            # Consuming an expired token must not bypass periodic cleanup.
+            await self._close_session_async(pending.conn_id, pending.session)
             await websocket.close(1008, "Token expired")
             return
         conn_id = pending.conn_id
-
-        session = self._sessions.get(conn_id)
-        if session is None:
+        with self._state_lock:
+            session = self._sessions.get(conn_id)
+        if session is None or (pending.session is not None and pending.session is not session):
             await websocket.close(1011, "Session not found")
             return
-
         session.websocket = websocket
-        logger.debug("Terminal: WebSocket connected for %s", conn_id)
-
-        # Start SSH→WS forwarder
-        forwarder = asyncio.ensure_future(self._ssh_to_ws(session))
-        session.forwarder_task = forwarder
-
+        session.forwarder_task = asyncio.create_task(self._ssh_to_ws(session))
         try:
-            # WS→SSH
             async for message in websocket:
                 if session.channel.closed:
                     break
-                try:
-                    if isinstance(message, str):
-                        # JSON control message (e.g. resize from xterm.js)
-                        if message.startswith('{'):
-                            import json as _json
-                            handled = False
-                            try:
-                                ctrl = _json.loads(message)
-                                msg_type = ctrl.get("type")
-                                if msg_type == "resize":
-                                    cols = int(ctrl.get("cols", 80))
-                                    rows = int(ctrl.get("rows", 24))
-                                    if cols > 0 and rows > 0:
-                                        self.resize_session(conn_id, cols, rows)
-                                    handled = True
-                                elif msg_type is not None:
-                                    handled = True  # unknown ctrl msg, ignore
-                            except (ValueError, KeyError, TypeError, AttributeError):
-                                pass  # not valid JSON – send to SSH as-is
-                            if handled:
-                                continue
-                        session.channel.sendall(message.encode("utf-8"))
-                    else:
-                        session.channel.sendall(message)
-                except Exception as e:
-                    logger.debug("Terminal: WS→SSH send error: %s", e)
-                    break
-        except Exception as e:
-            logger.debug("Terminal: WebSocket receive error: %s", e)
+                if isinstance(message, str):
+                    # Binary frames NEVER enter the control parser. For text,
+                    # consume only this explicitly recognized resize schema.
+                    try:
+                        ctrl = json.loads(message)
+                    except (ValueError, TypeError):
+                        ctrl = None
+                    if (isinstance(ctrl, dict) and set(ctrl) == {"type", "cols", "rows"}
+                            and ctrl["type"] == "resize"
+                            and type(ctrl["cols"]) is int and type(ctrl["rows"]) is int
+                            and 0 < ctrl["cols"] <= 65535 and 0 < ctrl["rows"] <= 65535):
+                        self.resize_session(conn_id, ctrl["cols"], ctrl["rows"])
+                        continue
+                    message = message.encode("utf-8")
+                session.channel.sendall(message)
+        except Exception as exc:
+            logger.debug("Terminal: WebSocket input ended: %s", exc)
         finally:
-            forwarder.cancel()
-            logger.debug("Terminal: WebSocket disconnected for %s", conn_id)
+            await self._close_session_async(conn_id, session)
 
     async def _ssh_to_ws(self, session: TerminalSession):
         loop = asyncio.get_running_loop()
-        while True:
-            try:
+        try:
+            while True:
                 data = await loop.run_in_executor(None, self._recv_channel, session.channel)
-            except Exception:
-                break
-            if data is None:
-                break
-            if session.websocket:
-                try:
-                    await session.websocket.send(data)
-                except Exception:
+                if data is None:
                     break
+                if session.websocket is not None:
+                    await session.websocket.send(data)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("Terminal: SSH output ended: %s", exc)
+        finally:
+            # EOF/error must close WS so xterm shows its reconnect overlay, and
+            # release SSH resources even when no more browser input arrives.
+            await self._close_session_async(session.conn_id, session)
 
     @staticmethod
     def _recv_channel(channel) -> bytes | None:
         import select
+
         while True:
-            if channel.closed:
+            # Drain both buffers BEFORE observing EOF/closed. Paramiko's
+            # select fd represents stdout AND stderr: readiness alone never
+            # means that a nonblocking stdout recv() will succeed.
+            for ready, receive in ((channel.recv_ready, channel.recv),
+                                   (channel.recv_stderr_ready, channel.recv_stderr)):
+                if ready():
+                    try:
+                        data = receive(4096)
+                    except (TimeoutError, BlockingIOError):
+                        # Readiness is only a snapshot. Still try the other
+                        # stream, then retry after select rather than closing WS.
+                        continue
+                    if data:
+                        return data
+            # Exit-status readiness is NOT stream EOF: a server may send the
+            # status before its final stdout/stderr packets.
+            if channel.closed or channel.eof_received:
+                # The transport may have fed the final packet between our
+                # initial readiness checks and setting EOF/closed.
+                if channel.recv_ready() or channel.recv_stderr_ready():
+                    continue
                 return None
-            r, _, _ = select.select([channel], [], [], 0.2)
-            if r:
-                try:
-                    data = channel.recv(4096)
-                    return data if data else None
-                except Exception:
-                    return None
+            # A buffer may have become ready since the checks above. Recheck
+            # BOTH streams at the top even when select reports readability.
+            select.select([channel], [], [], 0.2)
 
-    async def _close_session_async(self, conn_id: str):
-        session = self._sessions.pop(conn_id, None)
-        if session is None:
-            return
-        if session.forwarder_task:
-            session.forwarder_task.cancel()
-        try:
-            session.channel.close()
-        except Exception:
-            pass
-        try:
-            session.client.close()
-        except Exception:
-            pass
-        logger.debug("Terminal: session %s closed", conn_id)
+    async def _close_session_async(self, conn_id: str, expected=None):
+        with self._state_lock:
+            current = self._sessions.get(conn_id)
+            session = expected if expected is not None else current
+            if session is None:
+                return
+            if current is session:
+                self._sessions.pop(conn_id, None)
+            for token, pt in list(self._pending_tokens.items()):
+                if pt.session is session or (pt.session is None and pt.conn_id == conn_id and current is session):
+                    self._pending_tokens.pop(token, None)
+        # Detach fields before await: concurrent handler/forwarder cleanup is
+        # idempotent and an old generation never closes a replacement session.
+        forwarder, session.forwarder_task = session.forwarder_task, None
+        websocket, session.websocket = session.websocket, None
+        for resource in (session.channel, session.client):
+            try:
+                resource.close()
+            except Exception:
+                logger.debug("Terminal: SSH resource close failed", exc_info=True)
+        if forwarder is not None and forwarder is not asyncio.current_task():
+            forwarder.cancel()
+            await asyncio.gather(forwarder, return_exceptions=True)
+        if websocket is not None:
+            try:
+                await websocket.close(1000, "SSH session closed")
+            except Exception:
+                logger.debug("Terminal: WebSocket close failed", exc_info=True)
 
 
-# ---------------------------------------------------------------------------
-# Host-key helpers (shared with sftp_client via host_key_utils)
-# ---------------------------------------------------------------------------
-
-from src.ui.host_key_utils import (
-    is_host_known as _is_host_known,
-    get_server_fingerprint as _get_server_fingerprint,
-    TOFUAcceptPolicy as _TOFUAcceptPolicy,
-)
+from src.ui.host_key_utils import TOFUAcceptPolicy as _TOFUAcceptPolicy

@@ -1,48 +1,53 @@
-# build_installer.ps1
-# Builds the GUI + CLI executables (build_dual.ps1) and then compiles the
-# Windows installer (SSHDriveMgr.iss) from them with Inno Setup 6.
-#
-# Requires Inno Setup 6 (ISCC.exe) installed, default path assumed below.
-
-$ErrorActionPreference = "Stop"
+# Build GUI/CLI and compile Inno Setup. CI may reuse executables built this job.
+param([switch]$SkipBuild)
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
 $repoRoot = Split-Path -Parent $PSScriptRoot
-
-Write-Host "[1/2] Building GUI + CLI executables..." -ForegroundColor Cyan
 Push-Location $repoRoot
 try {
-    & .\build_dual.ps1
+    if (-not $SkipBuild) {
+        foreach ($mode in @('gui', 'cli')) {
+            & (Join-Path $repoRoot 'build_dual.ps1') -Mode $mode
+            $buildSucceeded = $?
+            $buildExitCode = $LASTEXITCODE
+            if (-not $buildSucceeded -or $buildExitCode -ne 0) {
+                throw "Executable build failed ($mode, exit code $buildExitCode)."
+            }
+        }
+    }
+    $version = (Get-Content 'src/version.txt' -Raw -Encoding UTF8).Trim()
+    if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid src/version.txt.' }
+    foreach ($name in @('SSHDriveMgr.exe', 'SSHDriveMgr-cli.exe')) {
+        $artifact = Get-Item -LiteralPath (Join-Path $repoRoot "dist/$name")
+        if ($artifact.Length -le 0 -or $artifact.VersionInfo.ProductVersion -ne $version) {
+            throw "Missing, empty or wrong-version input executable: $name"
+        }
+    }
+    $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+    if (-not (Test-Path -LiteralPath $iscc)) { $iscc = 'C:\Program Files\Inno Setup 6\ISCC.exe' }
+    if (-not (Test-Path -LiteralPath $iscc)) {
+        $iscc = (Get-Command ISCC.exe -ErrorAction Stop).Source
+    }
+    $outDir = [System.IO.Path]::GetFullPath((Join-Path $repoRoot 'dist_installer'))
+    if ((Split-Path $outDir -Parent) -ne $repoRoot) { throw "Unsafe installer output directory: $outDir" }
+    # The entire output directory is dedicated to installers; do not glob-pick
+    # an old version after a failed compile.
+    if (Test-Path -LiteralPath $outDir) {
+        Get-ChildItem -LiteralPath $outDir -Filter 'SSHDriveMgr-Setup-*.exe' | ForEach-Object {
+            if ($_.DirectoryName -ne $outDir) { throw 'Unsafe stale installer path.' }
+            Remove-Item -LiteralPath $_.FullName -Force
+        }
+    }
+    $started = [DateTime]::UtcNow
+    & $iscc (Join-Path $PSScriptRoot 'SSHDriveMgr.iss')
+    if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE." }
+    $setup = Join-Path $outDir "SSHDriveMgr-Setup-$version.exe"
+    $artifact = Get-Item -LiteralPath $setup -ErrorAction Stop
+    if ($artifact.Length -le 0 -or $artifact.LastWriteTimeUtc -lt $started.AddSeconds(-2)) {
+        throw "Empty or stale installer output: $setup"
+    }
+    if ($artifact.VersionInfo.ProductVersion -ne $version) { throw 'Installer embedded version mismatch.' }
+    Write-Host "Done! $setup" -ForegroundColor Green
 } finally {
     Pop-Location
 }
-
-$iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-if (-not (Test-Path $iscc)) {
-    $iscc = "C:\Program Files\Inno Setup 6\ISCC.exe"
-}
-if (-not (Test-Path $iscc)) {
-    throw "Inno Setup 6 (ISCC.exe) not found. Install it from https://jrsoftware.org/isinfo.php"
-}
-
-Write-Host "[2/2] Compiling installer..." -ForegroundColor Cyan
-
-# Drop setups of older versions, so dist_installer\ only ever holds the current
-# one (the release workflow picks the first *.exe it finds there).
-$outDir = Join-Path $repoRoot 'dist_installer'
-if (Test-Path $outDir) {
-    Get-ChildItem (Join-Path $outDir 'SSHDriveMgr-Setup-*.exe') -ErrorAction SilentlyContinue |
-        ForEach-Object {
-            Write-Host ("      removing stale installer {0}" -f $_.Name) -ForegroundColor DarkGray
-            Remove-Item $_.FullName -Force
-        }
-}
-
-& $iscc "$PSScriptRoot\SSHDriveMgr.iss"
-
-# The version in the installer name comes from src\version.txt (see the .iss).
-$version = (Get-Content (Join-Path $repoRoot 'src\version.txt') -Raw -Encoding UTF8).Trim()
-$setup = Join-Path $repoRoot "dist_installer\SSHDriveMgr-Setup-$version.exe"
-if (-not (Test-Path $setup)) {
-    throw "Expected installer '$setup' was not produced."
-}
-
-Write-Host "Done! $setup" -ForegroundColor Green

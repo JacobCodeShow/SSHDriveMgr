@@ -1,17 +1,11 @@
-"""
-worker.py – Asynchronous workers for background tasks.
-"""
-
+"""Qt workers: payload results and native QThread completion are distinct."""
 from PyQt6.QtCore import QThread, pyqtSignal
 from src.sshfs_controller import SSHFSController, MountResult
 from src.config import Connection
 
 
 class MountWorker(QThread):
-    """
-    Worker thread to handle mount operations without blocking the UI.
-    """
-    finished = pyqtSignal(str, MountResult)  # conn_id, result
+    result_ready = pyqtSignal(str, MountResult)
 
     def __init__(self, conn: Connection, controller: SSHFSController, disable_cache: bool = False):
         super().__init__()
@@ -22,16 +16,13 @@ class MountWorker(QThread):
     def run(self):
         try:
             result = self.controller.mount(self.conn, disable_cache=self.disable_cache)
-            self.finished.emit(self.conn.id, result)
-        except Exception as e:
-            self.finished.emit(self.conn.id, MountResult(False, f"Thread Error: {str(e)}"))
+        except Exception as error:
+            result = MountResult(False, f"Thread Error: {error}")
+        self.result_ready.emit(self.conn.id, result)
 
 
 class UnmountWorker(QThread):
-    """
-    Worker thread to handle unmount operations without blocking the UI.
-    """
-    finished = pyqtSignal(str, MountResult)  # conn_id, result
+    result_ready = pyqtSignal(str, MountResult)
 
     def __init__(self, conn_id: str, drive_letter: str, controller: SSHFSController):
         super().__init__()
@@ -42,21 +33,13 @@ class UnmountWorker(QThread):
     def run(self):
         try:
             result = self.controller.unmount(self.drive_letter)
-            self.finished.emit(self.conn_id, result)
-        except Exception as e:
-            self.finished.emit(self.conn_id, MountResult(False, f"Thread Error: {str(e)}"))
+        except Exception as error:
+            result = MountResult(False, f"Thread Error: {error}")
+        self.result_ready.emit(self.conn_id, result)
 
 
 class TerminalConnectWorker(QThread):
-    """
-    Worker thread to establish the SSH session behind an embedded xterm.js
-    terminal tab without blocking the UI. paramiko's connect() only bounds
-    the TCP/banner phase with its `timeout` argument — the auth phase can
-    still block for its own auth_timeout (default 30 s), which previously
-    froze the whole window since bridge_server.create_session_token() was
-    called directly on the Qt main thread.
-    """
-    finished = pyqtSignal(str, object)  # session_key, token (str) or None
+    result_ready = pyqtSignal(str, object)
 
     def __init__(self, bridge_server, session_key: str, conn):
         super().__init__()
@@ -69,4 +52,25 @@ class TerminalConnectWorker(QThread):
             token = self.bridge_server.create_session_token(self.session_key, self.conn)
         except Exception:
             token = None
-        self.finished.emit(self.session_key, token)
+        self.result_ready.emit(self.session_key, token)
+
+
+class ShutdownUnmountWorker(QThread):
+    """Unmount only this manager's recorded drives, never global process names."""
+    result_ready = pyqtSignal(list)
+
+    def __init__(self, mounts, controller: SSHFSController):
+        super().__init__()
+        self.mounts = list(mounts)
+        self.controller = controller
+
+    def run(self):
+        failures = []
+        for conn_id, drive_letter in self.mounts:
+            try:
+                result = self.controller.unmount(drive_letter)
+                if not result.success:
+                    failures.append((conn_id, drive_letter, result.message))
+            except Exception as error:
+                failures.append((conn_id, drive_letter, str(error)))
+        self.result_ready.emit(failures)

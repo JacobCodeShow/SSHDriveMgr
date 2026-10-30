@@ -5,6 +5,7 @@ from PyQt6.QtWidgets import QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QDial
 from PyQt6.QtCore import Qt
 
 from src.ui.frameless_dialog import FramelessDialog
+from src.i18n import tr
 
 
 class StyledMessageBox(FramelessDialog):
@@ -26,40 +27,50 @@ class StyledMessageBox(FramelessDialog):
 
     @classmethod
     def question(cls, parent, title: str, text: str,
-                 yes_text: str = "Ja", no_text: str = "Nein") -> bool:
+                 yes_text: str | None = None, no_text: str | None = None,
+                 *, destructive: bool = False) -> bool:
         dlg = cls(parent, title, text, "question",
-                  yes_text=yes_text, no_text=no_text)
+                  yes_text=yes_text, no_text=no_text, destructive=destructive)
         return dlg.exec() == QDialog.DialogCode.Accepted
 
     def __init__(self, parent, title: str, text: str, mode: str = "info",
-                 yes_text: str = "Ja", no_text: str = "Nein"):
+                 yes_text: str | None = None, no_text: str | None = None,
+                 *, destructive: bool = False):
         super().__init__(parent)
         self.setModal(True)
         self.setWindowTitle(title)
         self.setMinimumWidth(380)
         self.setObjectName("dialogSurface")
-        self._build_content(title, text, mode, yes_text, no_text)
+        self._build_content(
+            title, text, mode, yes_text or tr("dialog.yes"),
+            no_text or tr("dialog.no"), destructive,
+        )
 
     def _build_content(self, title: str, text: str, mode: str,
-                       yes_text: str, no_text: str):
+                       yes_text: str, no_text: str, destructive: bool = False):
         layout = QVBoxLayout(self._fdlg_content)
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(16)
 
-        # Content row: emoji + text
+        # Use the same crisp SVG line icons as navigation and action buttons.
         content_row = QHBoxLayout()
         content_row.setSpacing(16)
-
-        emoji_map = {
-            "info":     "💡",
-            "warning":  "🚨",
-            "error":    "💥",
-            "question": "🤔",
+        from src.theme_manager import get_theme_manager
+        from src.ui.icons import pixmap as svg_pixmap
+        colors = get_theme_manager().get_colors()
+        tones = {
+            "info": ("info", colors["accent"]),
+            "warning": ("shield", "#e4b25c" if colors["is_dark"] else "#95600e"),
+            "error": ("x", "#e77783" if colors["is_dark"] else "#bb3c4b"),
+            "question": ("info", colors["muted"]),
         }
-        icon_lbl = QLabel(emoji_map.get(mode, "💬"))
-        icon_lbl.setStyleSheet("font-size: 36px; background: transparent; margin-right: 6px;")
-        icon_lbl.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
-        content_row.addWidget(icon_lbl)
+        icon_name, icon_color = tones.get(mode, ("info", colors["accent"]))
+        icon_lbl = QLabel()
+        icon_lbl.setObjectName("messageIcon")
+        icon_lbl.setFixedSize(44, 44)
+        icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_lbl.setPixmap(svg_pixmap(icon_name, icon_color, 22))
+        content_row.addWidget(icon_lbl, 0, Qt.AlignmentFlag.AlignTop)
 
         text_col = QVBoxLayout()
         text_col.setSpacing(8)
@@ -88,22 +99,19 @@ class StyledMessageBox(FramelessDialog):
             no_btn = QPushButton(no_text)
             no_btn.setObjectName("secondaryBtn")
             no_btn.setMinimumHeight(32)
+            no_btn.setDefault(True)
             no_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             no_btn.clicked.connect(self.reject)
             btn_row.addWidget(no_btn)
 
-            is_destructive = any(
-                kw in text.lower()
-                for kw in ("löschen", "delete", "entfernen", "remove")
-            )
             yes_btn = QPushButton(yes_text)
-            yes_btn.setObjectName("dangerBtn" if is_destructive else "primaryBtn")
+            yes_btn.setObjectName("dangerBtn" if destructive else "primaryBtn")
             yes_btn.setMinimumHeight(32)
             yes_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             yes_btn.clicked.connect(self.accept)
             btn_row.addWidget(yes_btn)
         else:
-            ok_btn = QPushButton("OK")
+            ok_btn = QPushButton(tr("dialog.ok"))
             ok_btn.setObjectName("primaryBtn")
             ok_btn.setMinimumHeight(32)
             ok_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -117,19 +125,23 @@ class StyledInputDialog(FramelessDialog):
     """Single-line text input dialog matching the app's frameless design."""
 
     @classmethod
-    def get_text(cls, parent, title: str, label: str, text: str = "") -> tuple[str, bool]:
-        """Show dialog, return (entered_text, accepted)."""
-        dlg = cls(parent, title, label, text)
+    def get_text(cls, parent, title: str, label: str, text: str = "", *,
+                 password: bool = False) -> tuple[str, bool]:
+        """Return raw password text, normalizing ordinary identifiers only."""
+        dlg = cls(parent, title, label, text, password=password)
         accepted = dlg.exec() == QDialog.DialogCode.Accepted
-        return (dlg._input.text().strip(), accepted)
+        value = dlg._input.text()
+        return (value if password else value.strip(), accepted)
 
-    def __init__(self, parent, title: str, label: str, text: str = ""):
+    def __init__(self, parent, title: str, label: str, text: str = "", *, password: bool = False):
         super().__init__(parent)
         self.setModal(True)
         self.setWindowTitle(title)
         self.setMinimumWidth(400)
         self.setObjectName("dialogSurface")
         self._build_content(title, label, text)
+        if password:
+            self._input.setEchoMode(QLineEdit.EchoMode.Password)
 
     def _build_content(self, title: str, label: str, text: str):
         layout = QVBoxLayout(self._fdlg_content)
@@ -153,14 +165,14 @@ class StyledInputDialog(FramelessDialog):
         btn_row = QHBoxLayout()
         btn_row.addStretch()
 
-        cancel_btn = QPushButton("Abbrechen")
+        cancel_btn = QPushButton(tr("dialog.cancel"))
         cancel_btn.setObjectName("secondaryBtn")
         cancel_btn.setMinimumHeight(32)
         cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(cancel_btn)
 
-        ok_btn = QPushButton("OK")
+        ok_btn = QPushButton(tr("dialog.ok"))
         ok_btn.setObjectName("primaryBtn")
         ok_btn.setMinimumHeight(32)
         ok_btn.setCursor(Qt.CursorShape.PointingHandCursor)

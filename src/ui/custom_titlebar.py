@@ -1,4 +1,4 @@
-﻿"""
+"""
 custom_titlebar.py – Custom window titlebar widget.
 
 Provides _TitlebarButton and CustomTitleBar.
@@ -8,6 +8,10 @@ Theme is controlled via set_theme(); set_maximized() toggles the restore icon.
 from __future__ import annotations
 
 import ctypes
+import weakref
+
+from src.i18n import tr
+from src.theme_manager import get_theme_manager
 
 from PyQt6.QtWidgets import QWidget, QHBoxLayout, QLabel, QPushButton
 from PyQt6.QtCore import Qt, QSize, QRect, pyqtSignal
@@ -103,12 +107,21 @@ class CustomTitleBar(QWidget):
         self.setObjectName("customTitlebar")
         self._build(title, version, app_icon)
         self._apply_palette()
+        manager = get_theme_manager()
+        manager.subscribe(self.set_theme)
+        widget_ref = weakref.ref(self)
+
+        def unsubscribe_on_destroy(*_):
+            widget = widget_ref()
+            if widget is not None:
+                manager.unsubscribe(widget.set_theme)
+
+        self.destroyed.connect(unsubscribe_on_destroy)
 
     # ── public API ───────────────────────────────────────────────────────────
 
     def set_theme(self, theme: str) -> None:
-        if self._theme == theme:
-            return
+        # Repeated apply may follow a user-theme import/cache invalidation.
         self._theme   = theme
         self._palette = get_palette(theme)
         self._apply_palette()
@@ -121,7 +134,7 @@ class CustomTitleBar(QWidget):
         icon_name = "restore" if maximized else "maximize"
         self._max_btn.set_icon_name(icon_name, self._palette)
         self._max_btn.setToolTip(
-            "Wiederherstellen" if maximized else "Maximieren"
+            tr("window.restore") if maximized else tr("window.maximize")
         )
 
     def button_rects_global(self) -> list[QRect]:
@@ -264,15 +277,15 @@ class CustomTitleBar(QWidget):
 
         p = self._palette
         self._min_btn = _TitlebarButton("minus", p, parent=self)
-        self._min_btn.setToolTip("Minimieren")
+        self._min_btn.setToolTip(tr("window.minimize"))
         self._min_btn.clicked.connect(self.minimize_requested)
 
         self._max_btn = _TitlebarButton("maximize", p, parent=self)
-        self._max_btn.setToolTip("Maximieren")
+        self._max_btn.setToolTip(tr("window.maximize"))
         self._max_btn.clicked.connect(self.maximize_requested)
 
         self._close_btn = _TitlebarButton("x", p, is_close=True, parent=self)
-        self._close_btn.setToolTip("Schließen")
+        self._close_btn.setToolTip(tr("window.close"))
         self._close_btn.clicked.connect(self.close_requested)
 
         layout.addWidget(self._min_btn)

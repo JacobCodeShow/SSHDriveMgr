@@ -130,6 +130,19 @@ def _is_host_known(host: str, port: int, known_hosts_path: str) -> bool:
     return False
 
 
+def _ssh_config_path(path: str) -> str:
+    """Quote a path for OpenSSH's config parser, not just Windows argv.
+
+    SSHFS forwards IdentityFile/UserKnownHostsFile as an ssh -o option. Even
+    though Popen preserves one argv item, ssh tokenizes its value again; spaces
+    therefore need literal quotes inside that item. Forward slashes also avoid
+    backslash escaping at that second parsing layer.
+    """
+    if any(ch in path for ch in ('"', '\r', '\n', '\x00', ',')):
+        raise ValueError("Unsupported character in SSH option path")
+    return '"' + path.replace("\\", "/") + '"'
+
+
 def _ssh_host_key_check_option() -> str:
     """
     Use OpenSSH's TOFU mode so the first verified connection can populate known_hosts.
@@ -325,6 +338,10 @@ class SSHFSController:
         # SECURITY FIX: Use absolute path for known_hosts instead of %USERPROFILE%
         # SSHFS cannot expand %USERPROFILE% correctly
         known_hosts_path = os.path.expanduser("~\\.ssh\\known_hosts")
+        try:
+            known_hosts_option = _ssh_config_path(known_hosts_path)
+        except ValueError as exc:
+            return MountResult(False, str(exc))
 
         cmd = [
             sshfs_exe,
@@ -334,7 +351,7 @@ class SSHFSController:
             f"-ovolname={safe_name}",
             "-f",
             f"-o{_ssh_host_key_check_option()}",
-            f"-oUserKnownHostsFile={known_hosts_path}",
+            f"-oUserKnownHostsFile={known_hosts_option}",
             "-oreconnect",
             "-oServerAliveInterval=15",
             "-oServerAliveCountMax=3",
@@ -432,7 +449,11 @@ class SSHFSController:
                 logger.error(f"Error reading key file: {e}")
                 return MountResult(False, f"Fehler beim Lesen des SSH-Keys: {e}")
 
-            cmd.append(f"-oIdentityFile={key_path}")
+            try:
+                identity_option = _ssh_config_path(key_path)
+            except ValueError as exc:
+                return MountResult(False, str(exc))
+            cmd.append(f"-oIdentityFile={identity_option}")
             cmd.append("-oBatchMode=yes")
             cmd.append("-oPreferredAuthentications=publickey")
             logger.info(f"Using SSH key: {key_path}")

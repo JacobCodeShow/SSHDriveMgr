@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QApplication, QSystemTrayIcon, QDialog,
     QLineEdit, QSpinBox, QComboBox, QCheckBox, QFrame,
     QFileDialog, QRadioButton, QDialogButtonBox, QMenu,
-    QInputDialog, QSplitter, QSplitterHandle, QSizePolicy, QStackedWidget, QGridLayout
+    QInputDialog, QSplitter, QSplitterHandle, QSizePolicy, QStackedWidget, QGridLayout, QToolButton
 )
 from PyQt6.QtGui import QFont, QIcon, QPainter, QColor, QPen, QBrush, QShortcut, QKeySequence
 from PyQt6.QtCore import Qt, QTimer, pyqtSlot, QSize, pyqtSignal
@@ -41,15 +41,15 @@ from src.ui.connection_card import ConnectionCard
 from src.ui.system_tray import SystemTray
 from src.ui.debug_window import DebugWindow
 from src.app_logger import logger
-from src.ui.worker import MountWorker, UnmountWorker, TerminalConnectWorker
-from src.ui.dialogs.styled_message_box import StyledMessageBox
+from src.ui.worker import MountWorker, UnmountWorker, TerminalConnectWorker, ShutdownUnmountWorker
+from src.ui.dialogs.styled_message_box import StyledMessageBox, StyledInputDialog
 from src.ui.dialogs.login_dialog import LoadingSplash
 from src.ui.frameless_dialog import FramelessDialog
 from src.ui.frameless_window import FramelessMainWindow
 from src.ui.icons import icon as svg_icon, pixmap as svg_pixmap
 from src.ui.widgets.no_wheel import NoWheelComboBox, NoWheelSpinBox
+from src.ui.widgets.interval_input import IntervalInput
 from src.i18n import tr, current_language, available_languages, set_language, is_rtl
-from src.channel import display_name
 from PyQt6.QtCore import QThread
 
 
@@ -227,9 +227,15 @@ class _AuthMethodDialog(FramelessDialog):
 
 
 class MainWindow(FramelessMainWindow):
+    _terminal_tofu_requested = pyqtSignal(str, int, str, object)
+    shutdown_cancelled = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
+        self._terminal_tofu_requested.connect(
+            self._dispatch_terminal_tofu_dialog,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._user = Session.current()
         self._mgr = UserConnectionManager(self._user)
         # Ensure UI language is always initialized from persisted user settings,
@@ -243,10 +249,19 @@ class MainWindow(FramelessMainWindow):
         self._cards: dict[str, ConnectionCard] = {}
         self._selected_id: str | None = None
         self._workers: dict[str, QThread] = {}
+        self._tracked_workers: set[QThread] = set()
+        self._borrowed_workers: set[QThread] = set()
+        self._worker_reaper_timer = QTimer(self)
+        self._worker_reaper_timer.setInterval(50)
+        self._worker_reaper_timer.timeout.connect(self._reap_finished_workers)
+        self._lost_mounts: dict[str, tuple[int, float]] = {}
+        self._automatic_remounts: set[str] = set()
+        self._deleting_connections: set[str] = set()
         self._terminal_connect_workers: dict[str, TerminalConnectWorker] = {}
         self._terminal_pending_conn: dict[str, object] = {}
         self._terminal_connecting: set[str] = set()  # conn_ids with a connect in flight
         self._sftp_browsers: dict[str, object] = {}
+        self._sysinfo_auth_conn: Connection | None = None
         self._panel_mode: str = _PANEL_NONE
         self._panel_conn_id: str | None = None   # which connection the panel belongs to
         self._ef_initial_snapshot: dict | None = None
@@ -256,6 +271,15 @@ class MainWindow(FramelessMainWindow):
         self._shortcuts: list[QShortcut] = []
         self._clipboard_conn_id: str | None = None  # for copy/paste (Ctrl+C/V)
         self._explicit_quit = False
+        self._shutdown_requested = False
+        self._shutdown_unmount = True
+        self._shutdown_unmount_started = False
+        self._shutdown_unmount_done = False
+        self._logout_on_shutdown = False
+        self._pending_tofu_requests = []
+        self._shutdown_timer = QTimer(self)
+        self._shutdown_timer.setInterval(50)
+        self._shutdown_timer.timeout.connect(self._advance_shutdown)
         
         # Debug mode settings
         self._debug_mode = False  # Can be toggled via F2
@@ -268,9 +292,15 @@ class MainWindow(FramelessMainWindow):
         self._terminal_session_counter: dict[str, int] = {}  # conn_id → next session index
 
         self.setObjectName("MainWindow")
-        self.setWindowTitle(display_name() + " v" + APP_VERSION)
-        self.setMinimumSize(820, 520)
-        self.resize(1100, 640)
+        self.setWindowTitle(tr("app.title") + " v" + APP_VERSION)
+        screen = QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen else None
+        min_width = min(1180, available.width()) if available else 1180
+        min_height = min(680, available.height()) if available else 680
+        self.setMinimumSize(min_width, min_height)
+        start_width = min(1440, max(min_width, int(available.width() * .90))) if available else 1280
+        start_height = min(900, max(min_height, int(available.height() * .90))) if available else 800
+        self.resize(start_width, start_height)
 
         def get_resource_path(relative_path):
             import sys
@@ -306,8 +336,9 @@ class MainWindow(FramelessMainWindow):
 
         self._check_prerequisites()
         QTimer.singleShot(2000, self._auto_reconnect_mounts)
-        QTimer.singleShot(0, lambda: self._apply_titlebar_color(self._mgr.get_settings().theme or "dark"))
-        QTimer.singleShot(0, lambda: self._update_header_btn_icons(self._mgr.get_settings().theme or "dark"))
+        from src.theme_manager import get_theme_manager
+        get_theme_manager().subscribe(self._on_theme_changed)
+        QTimer.singleShot(0, lambda: self._on_theme_changed(get_theme_manager().current_theme))
 
         import src.app_logger as _log_mod
         _em = _log_mod.log_emitter
@@ -322,7 +353,8 @@ class MainWindow(FramelessMainWindow):
 
     def _setup_ipc(self):
         import threading
-        self._ipc_pipe_name = r"\\.\pipe\SSHDriveMgr_IPC_v1"
+        from src.windows_identity import ipc_pipe_name
+        self._ipc_pipe_name = ipc_pipe_name()
         self._ipc_running = True
         self._ipc_thread = threading.Thread(target=self._ipc_listener, daemon=True)
         self._ipc_thread.start()
@@ -384,63 +416,22 @@ class MainWindow(FramelessMainWindow):
             _ipc_rate[pid] = entry
             return entry["count"] <= _IPC_MAX_FAILS
 
-        # SECURITY FIX (FINDING-01): Build a SECURITY_ATTRIBUTES struct that
-        # restricts pipe access to the current user only (replaces bare None).
-        def _make_pipe_security_attributes():
-            """Return a SECURITY_ATTRIBUTES ctypes struct granting access only to
-            the current user, or None on failure (falls back to default)."""
-            try:
-                # Get current user SID
-                username = win32api.GetUserNameEx(win32con.NameSamCompatible)
-                sid, _, _ = win32security.LookupAccountName(None, username)
-
-                # Build a DACL with a single ACE: GENERIC_READ | GENERIC_WRITE for current user
-                dacl = win32security.ACL()
-                dacl.AddAccessAllowedAce(
-                    win32security.ACL_REVISION,
-                    ntsecuritycon.GENERIC_READ | ntsecuritycon.GENERIC_WRITE,
-                    sid
-                )
-
-                # Attach the DACL to a new Security Descriptor
-                sd = win32security.SECURITY_DESCRIPTOR()
-                sd.SetSecurityDescriptorDacl(True, dacl, False)
-
-                # Build a SECURITY_ATTRIBUTES struct pointing to the SD
-                class SECURITY_ATTRIBUTES(ctypes.Structure):
-                    _fields_ = [
-                        ("nLength",              ctypes.c_ulong),
-                        ("lpSecurityDescriptor", ctypes.c_void_p),
-                        ("bInheritHandle",       ctypes.c_bool),
-                    ]
-
-                sa = SECURITY_ATTRIBUTES()
-                sa.nLength = ctypes.sizeof(SECURITY_ATTRIBUTES)
-                # Keep the SD object alive for the lifetime of sa so GC
-                # doesn't free the buffer referenced by lpSecurityDescriptor.
-                sa._sd_obj = sd
-                # Obtain a raw pointer to the SD via win32security
-                raw_sd = win32security.ConvertStringSecurityDescriptorToSecurityDescriptor(
-                    sd.GetSecurityDescriptorSddl(win32security.DACL_SECURITY_INFORMATION),
-                    win32security.SDDL_REVISION_1,
-                )
-                sa._sd_raw = raw_sd
-                # Use the PyHANDLE buffer address as lpSecurityDescriptor
-                import ctypes
-                sa.lpSecurityDescriptor = ctypes.cast(
-                    ctypes.c_char_p(bytes(raw_sd)), ctypes.c_void_p
-                )
-                sa.bInheritHandle = False
-                return sa
-            except Exception as e:
-                logger.warning(f"IPC: SECURITY_ATTRIBUTES konnte nicht erstellt werden: {e} — "
-                               "Pipe wird mit Standard-ACL erstellt (FINDING-01 nicht vollständig gemindert).")
-                return None
+        # Fail closed: never publish a credential-bearing pipe with default ACLs.
+        from src.ipc_security import make_pipe_security_attributes
+        try:
+            sa = make_pipe_security_attributes()
+        except Exception as error:
+            logger.error("IPC disabled: cannot construct current-user ACL: %s", error)
+            self._ipc_running = False
+            return
+        # Keep `sa` and its owned descriptor buffer alive for the listener lifetime.
+        sa_ptr = ctypes.byref(sa)
 
         PIPE_ACCESS_DUPLEX    = 0x00000003
         PIPE_TYPE_MESSAGE     = 0x00000004
         PIPE_READMODE_MESSAGE = 0x00000002
         PIPE_WAIT             = 0x00000000
+        PIPE_REJECT_REMOTE_CLIENTS = 0x00000008
 
         def _read_full_message(pipe_handle):
             """Reads one complete message from a message-mode pipe.
@@ -471,11 +462,9 @@ class MainWindow(FramelessMainWindow):
 
         while self._ipc_running:
             try:
-                sa = _make_pipe_security_attributes()
-                sa_ptr = ctypes.byref(sa) if sa is not None else None
                 pipe = _k32.CreateNamedPipeW(
                     self._ipc_pipe_name, PIPE_ACCESS_DUPLEX,
-                    PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                    PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                     5, 1048576, 1048576, 5000,
                     sa_ptr  # SECURITY FIX (FINDING-01): proper DACL instead of None
                 )
@@ -521,7 +510,7 @@ class MainWindow(FramelessMainWindow):
                                     # revisiting FINDING-01's original blanket omission). Sending
                                     # it over this pipe is safe in the same way the key_path was
                                     # already considered safe: CreateNamedPipeW above uses
-                                    # _make_pipe_security_attributes(), which restricts the pipe
+                                    # make_pipe_security_attributes(), which restricts the pipe
                                     # to the current user's SID only, so only this same account's
                                     # own processes can ever connect; the 64-byte cli_access_key
                                     # is itself a strong bearer secret gating this response; and
@@ -623,8 +612,15 @@ class MainWindow(FramelessMainWindow):
         self._body_splitter.addWidget(self._right_panel_widget)
         self._body_splitter.setCollapsible(0, False)
         self._body_splitter.setCollapsible(1, False)
-        self._body_splitter.setSizes([420, 620])
+        pane_space = max(0, self.width() - 176 - self._body_splitter.handleWidth())
+        left_min = min(520, pane_space // 2)
+        right_min = min(420, pane_space - left_min)
+        self._body_splitter.widget(0).setMinimumWidth(left_min)
+        self._body_splitter.widget(1).setMinimumWidth(right_min)
+        left_target = min(max(int(pane_space * .58), left_min), pane_space - right_min)
+        self._body_splitter.setSizes([left_target, pane_space - left_target])
         self._body_splitter.splitterMoved.connect(self._clamp_splitter_40)
+        self._body_splitter.splitterMoved.connect(self._update_connection_header_layout)
 
         # Stack page 1: full-screen panel (settings, users)
         self._fullscreen_widget = self._build_fullscreen_panel()
@@ -639,16 +635,21 @@ class MainWindow(FramelessMainWindow):
         root.addWidget(self._build_status_bar())
         self._show_right_panel_placeholder()
 
-    def _sidebar_btn(self, icon_name: str, slot=None, *, active: bool = False, btn_type: str = "") -> QPushButton:
-        btn = QPushButton()
+    def _sidebar_btn(self, icon_name: str, slot=None, *, active: bool = False,
+                     btn_type: str = "", label: str = "") -> QPushButton:
+        btn = QPushButton(label)
         btn.setObjectName("sidebarBtn")
-        btn.setFixedSize(QSize(42, 42))
+        btn.setFixedSize(QSize(156, 44) if label else QSize(42, 42))
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        if label:
+            btn.setToolTip(label)
+            btn.setAccessibleName(label)
+            btn.setAccessibleDescription(label)
         if active:
             btn.setProperty("active", "true")
         if btn_type:
             btn.setProperty("btn_type", btn_type)
-        theme = (self._mgr.get_settings().theme or "dark")
+        theme = (self._current_theme())
         if btn_type == "danger":
             color = "#ef4444" if theme == "dark" else "#b91c1c"
         elif btn_type == "warning":
@@ -667,38 +668,38 @@ class MainWindow(FramelessMainWindow):
     def _build_sidebar(self) -> QWidget:
         sidebar = QWidget()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(60)
+        sidebar.setFixedWidth(176)
         v = QVBoxLayout(sidebar)
-        v.setContentsMargins(8, 10, 8, 10)
-        v.setSpacing(8)
-        v.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        v.setContentsMargins(10, 12, 10, 12)
+        v.setSpacing(7)
+        v.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
 
-        self._sb_home_btn = self._sidebar_btn("cloud", active=True)
+        self._sb_home_btn = self._sidebar_btn("cloud", active=True, label=tr("header.connections"))
         self._sb_home_btn.clicked.connect(self._nav_home)
         v.addWidget(self._sb_home_btn, 0, Qt.AlignmentFlag.AlignHCenter)
 
         self._sb_users_btn = None
         if Session.is_admin():
-            self._sb_users_btn = self._sidebar_btn("users", self._on_user_management)
+            self._sb_users_btn = self._sidebar_btn("users", self._on_user_management, label=tr("main.users"))
             v.addWidget(self._sb_users_btn, 0, Qt.AlignmentFlag.AlignHCenter)
 
         # Profile button for all users (password change, etc.)
-        self._sb_profile_btn = self._sidebar_btn("key", self._on_profile)
+        self._sb_profile_btn = self._sidebar_btn("key", self._on_profile, label=tr("main.password"))
         v.addWidget(self._sb_profile_btn, 0, Qt.AlignmentFlag.AlignHCenter)
 
         v.addStretch()
 
-        self._debug_btn = self._sidebar_btn("bug", self._on_debug, btn_type="warning")
+        self._debug_btn = self._sidebar_btn("bug", self._on_debug, btn_type="warning", label=tr("main.debug"))
         self._debug_btn.setVisible(False)
         v.addWidget(self._debug_btn, 0, Qt.AlignmentFlag.AlignHCenter)
 
-        self._about_btn = self._sidebar_btn("info", self._on_about)
+        self._about_btn = self._sidebar_btn("info", self._on_about, label=tr("main.about"))
         v.addWidget(self._about_btn, 0, Qt.AlignmentFlag.AlignHCenter)
 
-        self._sb_settings_btn = self._sidebar_btn("settings", self._on_settings)
+        self._sb_settings_btn = self._sidebar_btn("settings", self._on_settings, label=tr("main.settings"))
         v.addWidget(self._sb_settings_btn, 0, Qt.AlignmentFlag.AlignHCenter)
 
-        logout_btn = self._sidebar_btn("logout", self._on_logout, btn_type="danger")
+        logout_btn = self._sidebar_btn("logout", self._on_logout, btn_type="danger", label=tr("main.logout"))
         v.addWidget(logout_btn, 0, Qt.AlignmentFlag.AlignHCenter)
 
         return sidebar
@@ -719,8 +720,9 @@ class MainWindow(FramelessMainWindow):
             btn.setProperty("active", "true" if is_active else "false")
             btn.style().unpolish(btn)
             btn.style().polish(btn)
-            theme = (self._mgr.get_settings().theme or "dark")
-            icon_color = "#00b4d8" if is_active else ("#aab4c4" if theme == "dark" else "#2f4051")
+            theme = (self._current_theme())
+            colors = self._theme_colors()
+            icon_color = colors["accent"] if is_active else colors["muted"]
             btn.setIcon(svg_icon(icon_name, icon_color, 18))
             btn.setIconSize(QSize(18, 18))
 
@@ -748,12 +750,18 @@ class MainWindow(FramelessMainWindow):
         title_lbl.setObjectName("connectionsTitle")
         title_layout.addWidget(title_lbl)
 
+        # Keep the variable-width count as a subtitle, not as a button in the action row.
+        self._badge_lbl = QLabel("")
+        self._badge_lbl.setObjectName("connectionsSummary")
+        self._badge_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self._badge_lbl.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        title_layout.addWidget(self._badge_lbl)
         header_h.addWidget(title_wrap)
         header_h.addStretch()
 
         self._add_btn = QPushButton()
         self._add_btn.setObjectName("headerAddBtn")
-        self._add_btn.setFixedSize(QSize(32, 32))
+        self._add_btn.setFixedSize(QSize(40, 40))
         self._add_btn.setIcon(svg_icon("plus", "#aab4c4", 16))
         self._add_btn.setIconSize(QSize(16, 16))
         self._add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -764,7 +772,7 @@ class MainWindow(FramelessMainWindow):
         # Mount/Dismount All Buttons
         self._mount_all_btn = QPushButton()
         self._mount_all_btn.setObjectName("headerActionBtn")
-        self._mount_all_btn.setFixedSize(QSize(30, 30))
+        self._mount_all_btn.setFixedSize(QSize(40, 40))
         self._mount_all_btn.setIcon(svg_icon("cloud", "#0077b6", 16))
         self._mount_all_btn.setIconSize(QSize(16, 16))
         self._mount_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -774,7 +782,7 @@ class MainWindow(FramelessMainWindow):
 
         self._dismount_all_btn = QPushButton()
         self._dismount_all_btn.setObjectName("headerActionBtn")
-        self._dismount_all_btn.setFixedSize(QSize(30, 30))
+        self._dismount_all_btn.setFixedSize(QSize(40, 40))
         self._dismount_all_btn.setIcon(svg_icon("x", "#ef4444", 16))
         self._dismount_all_btn.setIconSize(QSize(16, 16))
         self._dismount_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -782,19 +790,42 @@ class MainWindow(FramelessMainWindow):
         self._dismount_all_btn.clicked.connect(self._on_dismount_all)
         header_h.addWidget(self._dismount_all_btn)
 
-        # Groups Filter Combo - centered with same height as badge
-        self._groups_combo = NoWheelComboBox()
-        self._groups_combo.setObjectName("headerGroupsCombo")
-        self._groups_combo.setFixedSize(QSize(120, 30))
-        self._groups_combo.setToolTip(tr("main.groups_filter"))
-        self._groups_combo.currentIndexChanged.connect(self._on_group_filter_changed)
-        header_h.addWidget(self._groups_combo, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._header_overflow_btn = QToolButton()
+        self._header_overflow_btn.setObjectName("headerActionBtn")
+        self._header_overflow_btn.setFixedSize(QSize(40, 40))
+        self._header_overflow_btn.setIcon(svg_icon("chevron-down", self._theme_colors()["muted"], 15))
+        self._header_overflow_btn.setToolTip(tr("main.more_actions"))
+        self._header_overflow_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        overflow_menu = QMenu(self._header_overflow_btn)
+        overflow_menu.addAction(svg_icon("cloud", self._theme_colors()["accent"], 15),
+                                tr("main.mount_all"),
+                                lambda: self._on_mount_all())
+        overflow_menu.addAction(svg_icon("x", self._theme_colors()["muted"], 15),
+                                tr("main.dismount_all"),
+                                lambda: self._on_dismount_all())
+        self._header_overflow_btn.setMenu(overflow_menu)
+        self._header_overflow_btn.setVisible(False)
+        header_h.addWidget(self._header_overflow_btn)
 
-        self._badge_lbl = QLabel("")
-        self._badge_lbl.setObjectName("connectionsBadge")
-        self._badge_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._badge_lbl.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
-        header_h.addWidget(self._badge_lbl)
+        # Keep the combo as the filter model; expose it as a 40x40 icon menu so
+        # every action in this toolbar has the same footprint.
+        self._groups_combo = NoWheelComboBox(self)
+        self._groups_combo.setObjectName("headerGroupsComboModel")
+        self._groups_combo.setVisible(False)
+        self._groups_combo.currentIndexChanged.connect(self._on_group_filter_changed)
+        self._groups_combo.currentIndexChanged.connect(self._sync_group_filter_menu)
+
+        self._group_filter_btn = QToolButton()
+        self._group_filter_btn.setObjectName("headerActionBtn")
+        self._group_filter_btn.setFixedSize(QSize(40, 40))
+        self._group_filter_btn.setIcon(svg_icon("filter", self._theme_colors()["muted"], 16))
+        self._group_filter_btn.setIconSize(QSize(16, 16))
+        self._group_filter_btn.setToolTip(tr("main.groups_filter"))
+        self._group_filter_btn.setAccessibleName(tr("main.groups_filter"))
+        self._group_filter_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._group_filter_menu = QMenu(self._group_filter_btn)
+        self._group_filter_btn.setMenu(self._group_filter_menu)
+        header_h.addWidget(self._group_filter_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         v.addWidget(header)
 
@@ -809,8 +840,8 @@ class MainWindow(FramelessMainWindow):
         self._list_container.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._list_container.customContextMenuRequested.connect(self._on_list_context_menu)
         self._list_layout = QVBoxLayout(self._list_container)
-        self._list_layout.setContentsMargins(12, 12, 12, 12)
-        self._list_layout.setSpacing(10)
+        self._list_layout.setContentsMargins(16, 16, 16, 16)
+        self._list_layout.setSpacing(12)
         self._list_layout.addStretch()
 
         scroll.setWidget(self._list_container)
@@ -850,7 +881,7 @@ class MainWindow(FramelessMainWindow):
         hh.addStretch()
 
         # Info button (shown in info mode - opens system info panel)
-        self._rp_info_btn = QPushButton("i")
+        self._rp_info_btn = QPushButton()
         self._rp_info_btn.setObjectName("cardInfoBtn")
         self._rp_info_btn.setFixedSize(QSize(32, 32))
         self._rp_info_btn.setIconSize(QSize(14, 14))
@@ -997,6 +1028,9 @@ class MainWindow(FramelessMainWindow):
         # Stacked widget for terminal panels
         self._terminal_stack = QStackedWidget()
         self._terminal_stack.setObjectName("terminalStack")
+        self._terminal_placeholder = QLabel(tr("terminal.connecting"))
+        self._terminal_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._terminal_stack.addWidget(self._terminal_placeholder)
         ta_layout.addWidget(self._terminal_stack, stretch=1)
 
         # "End session" bottom bar
@@ -1183,11 +1217,29 @@ class MainWindow(FramelessMainWindow):
 
         return panel
 
+    def _wrap_fullscreen_body(self, body: QWidget, max_width: int = 1180) -> QWidget:
+        """Center long-form pages on wide screens without overflowing narrow ones."""
+        content_width = min(max_width, max(420, self.width() - 240))
+        body.setFixedWidth(content_width)
+        body.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        wrapper = QWidget()
+        wrapper.setObjectName("fullscreenContentWrap")
+        wrapper_layout = QHBoxLayout(wrapper)
+        wrapper_layout.setContentsMargins(20, 0, 20, 0)
+        wrapper_layout.setSpacing(0)
+        wrapper_layout.addStretch(1)
+        wrapper_layout.addWidget(body)
+        wrapper_layout.addStretch(1)
+        return wrapper
+
     def _clear_fs_content(self):
         while self._fs_layout.count():
             item = self._fs_layout.takeAt(0)
             w = item.widget()
             if w:
+                # Hide immediately: deleteLater is deferred and otherwise old and
+                # new full-screen pages briefly paint over one another.
+                w.hide()
                 w.deleteLater()
 
     def _set_fullscreen_header(self, kicker: str = "", title: str = "", show_close: bool = True):
@@ -1266,7 +1318,7 @@ class MainWindow(FramelessMainWindow):
 
         card = ConnectionCard(
             conn, mounted=mounted,
-            theme=(self._mgr.get_settings().theme or "dark"),
+            theme=(self._current_theme()),
             debug_edit=bool(self._mgr.get_settings().debug_mode),
         )
         card.mount_requested.connect(self._on_mount)
@@ -1295,6 +1347,11 @@ class MainWindow(FramelessMainWindow):
             item = self._rp_layout.takeAt(0)
             w = item.widget()
             if w:
+                if hasattr(w, "stop_background_work"):
+                    worker = w.stop_background_work()
+                    if worker is not None:
+                        self._track_background_worker(worker)
+                w.hide()
                 w.deleteLater()
         # Prevent stale references to deleted Qt widgets from later save/click handlers.
         self._reset_edit_form_refs()
@@ -1337,14 +1394,29 @@ class MainWindow(FramelessMainWindow):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         if hasattr(self, "_body_splitter"):
+            self._update_connection_header_layout()
             self._clamp_splitter_40()
+
+    def _update_connection_header_layout(self, _position=None, _index=None) -> None:
+        """Adapt the toolbar to the actual list pane, including splitter drags."""
+        if not hasattr(self, "_header_overflow_btn"):
+            return
+        pane_width = (self._body_splitter.widget(0).width()
+                      if hasattr(self, "_body_splitter") else self.width() - 176)
+        compact = pane_width < 520
+        narrow = pane_width < 420
+        self._mount_all_btn.setVisible(not compact)
+        self._dismount_all_btn.setVisible(not compact)
+        self._header_overflow_btn.setVisible(compact)
+        self._group_filter_btn.setVisible(True)
+        self._badge_lbl.setVisible(not narrow)
 
     def _set_right_panel_header(self, kicker: str = "", title: str = ""):
         self._right_panel_title.setText(title)
         self._right_panel_title.setVisible(bool(title))
 
     def _show_right_panel_placeholder(self):
-        """Render the default empty-state panel instead of collapsing the area."""
+        """Render an actionable workspace overview instead of a blank split pane."""
         self._clear_right_panel_content()
         self._set_right_panel_header()
         self._rp_info_btn.setVisible(False)
@@ -1364,35 +1436,93 @@ class MainWindow(FramelessMainWindow):
         body = QWidget()
         body.setObjectName("rightPanelPlaceholder")
         body.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        v = QVBoxLayout(body)
-        v.setContentsMargins(18, 18, 18, 18)
-        v.setSpacing(12)
-        v.addStretch()
+        outer = QVBoxLayout(body)
+        outer.setContentsMargins(32, 28, 32, 28)
+        outer.setSpacing(0)
+        outer.addStretch(1)
 
-        copy = QWidget()
-        copy.setObjectName("rightPanelPlaceholderCopy")
-        copy.setFixedWidth(360)
-        copy_layout = QVBoxLayout(copy)
-        copy_layout.setContentsMargins(0, 0, 0, 0)
-        copy_layout.setSpacing(10)
+        content = QWidget()
+        content.setObjectName("workspaceWelcome")
+        content.setMaximumWidth(500)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
+        layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+
+        mark = QLabel()
+        mark.setObjectName("workspaceWelcomeMark")
+        mark.setFixedSize(72, 72)
+        mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mark.setPixmap(svg_pixmap("server", self._theme_colors()["accent"], 34))
+        layout.addWidget(mark, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        eyebrow = QLabel(tr("panel.placeholder.eyebrow"))
+        eyebrow.setObjectName("workspaceWelcomeEyebrow")
+        eyebrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(eyebrow)
 
         title = QLabel(tr("panel.placeholder.title"))
         title.setObjectName("rightPanelPlaceholderTitle")
         title.setWordWrap(True)
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
-        copy_layout.addWidget(title)
+        layout.addWidget(title)
 
         msg = QLabel(tr("panel.placeholder.body"))
         msg.setObjectName("rightPanelPlaceholderBody")
         msg.setWordWrap(True)
         msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
         msg.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
-        copy_layout.addWidget(msg)
+        layout.addWidget(msg)
 
-        v.addWidget(copy, 0, Qt.AlignmentFlag.AlignHCenter)
+        metrics = QWidget()
+        metrics.setObjectName("workspaceMetrics")
+        metrics_row = QHBoxLayout(metrics)
+        metrics_row.setContentsMargins(0, 8, 0, 0)
+        metrics_row.setSpacing(10)
+        total = len(self._mgr.get_connections())
+        # Match the visible cards exactly, including drive maps recovered at startup.
+        mounted = sum(1 for card in self._cards.values() if card.is_mounted)
+        for number, label_text in (
+            (total, tr("panel.placeholder.saved")),
+            (mounted, tr("panel.placeholder.mounted")),
+        ):
+            metric = QFrame()
+            metric.setObjectName("workspaceMetricCard")
+            metric_layout = QVBoxLayout(metric)
+            metric_layout.setContentsMargins(14, 11, 14, 11)
+            metric_layout.setSpacing(3)
+            value = QLabel(str(number))
+            value.setObjectName("workspaceMetricValue")
+            value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            metric_layout.addWidget(value)
+            caption = QLabel(label_text)
+            caption.setObjectName("workspaceMetricLabel")
+            caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            caption.setWordWrap(True)
+            metric_layout.addWidget(caption)
+            metrics_row.addWidget(metric, stretch=1)
+        layout.addWidget(metrics)
 
-        v.addStretch()
+        actions = QHBoxLayout()
+        actions.setContentsMargins(0, 8, 0, 0)
+        actions.setSpacing(10)
+        add_btn = QPushButton(tr("panel.placeholder.add"))
+        add_btn.setObjectName("primaryBtn")
+        add_btn.setMinimumHeight(40)
+        add_btn.setIcon(svg_icon("plus", "#ffffff", 15))
+        add_btn.clicked.connect(self._on_add)
+        actions.addWidget(add_btn)
+        settings_btn = QPushButton(tr("panel.placeholder.settings"))
+        settings_btn.setObjectName("secondaryBtn")
+        settings_btn.setMinimumHeight(40)
+        settings_btn.setIcon(svg_icon("settings", self._theme_colors()["muted"], 15))
+        settings_btn.clicked.connect(self._on_settings)
+        actions.addWidget(settings_btn)
+        layout.addLayout(actions)
+
+        outer.addWidget(content, 0, Qt.AlignmentFlag.AlignHCenter)
+        outer.addStretch(1)
         self._rp_layout.addWidget(body, stretch=1)
         self._right_panel_widget.setVisible(True)
         self._ensure_panel_sized()
@@ -1446,7 +1576,7 @@ class MainWindow(FramelessMainWindow):
 
         self._set_right_panel_header(tr("panel.header.details"), conn.name.upper())
         # Edit button: enabled=accent color, disabled=muted (theme-aware)
-        theme = self._mgr.get_settings().theme or "dark"
+        theme = self._current_theme()
         if edit_locked:
             edit_icon_color = "#aab4c4" if theme == "light" else "#2a3a4a"
         else:
@@ -1481,7 +1611,7 @@ class MainWindow(FramelessMainWindow):
         self._right_panel_widget.setVisible(True)
         self._ensure_panel_sized()
 
-    def _open_sysinfo_panel(self, conn_id: str):
+    def _open_sysinfo_panel(self, conn_id: str, *, reuse_auth: bool = False):
         """Show system info (SSH stats) for the given connection — always, regardless of mount."""
         if self._panel_mode in (_PANEL_EDIT, _PANEL_ADD):
             if not self._guard_leave_form():
@@ -1492,6 +1622,19 @@ class MainWindow(FramelessMainWindow):
         # System info is collected over SSH — not available for FTP/FTPS.
         if self._reject_ftp_action(conn, "ftp.ssh_unsupported"):
             return
+
+        if (
+            reuse_auth
+            and self._panel_mode == _PANEL_SYSINFO
+            and self._panel_conn_id == conn_id
+            and self._sysinfo_auth_conn is not None
+        ):
+            conn = self._sysinfo_auth_conn
+        else:
+            conn = self._prepare_auth(conn)
+            if conn is None:
+                return
+            self._sysinfo_auth_conn = conn
 
         if self._panel_conn_id and self._panel_conn_id in self._cards:
             self._cards[self._panel_conn_id].set_info_active(False)
@@ -1528,8 +1671,8 @@ class MainWindow(FramelessMainWindow):
         """Build the read-only info view for the right panel."""
         is_mounted = (conn.id in self._cards and self._cards[conn.id].is_mounted)
 
-        _theme = (self._mgr.get_settings().theme or "dark")
-        _val_color = "#ffffff" if _theme == "dark" else "#1a2332"
+        _theme = (self._current_theme())
+        _val_color = self._theme_colors()["text"]
 
         body = QWidget()
         body.setObjectName("rpInfoBody")
@@ -1540,7 +1683,7 @@ class MainWindow(FramelessMainWindow):
         def _section(title):
             lbl = QLabel(title.upper())
             lbl.setObjectName("rpSectionLabel")
-            lbl.setStyleSheet("color: #0077b6; font-size: 11px;font-weight: 600;text-transform: uppercase; letter-spacing: 1px; padding-top: 4px;")
+            lbl.setStyleSheet(f"color: {self._theme_colors()['accent']}; font-size: 11px;font-weight: 600;text-transform: uppercase; letter-spacing: 1px; padding-top: 4px;")
             return lbl
 
         def _row(label, value, value_obj_name="rpValue"):
@@ -1555,7 +1698,7 @@ class MainWindow(FramelessMainWindow):
             lbl.setStyleSheet("color: #6a7685; font-size: 11px; font-weight: 500;")
             val = QLabel(str(value) if value else "—")
             val.setObjectName(value_obj_name)
-            val.setStyleSheet(f"color: {_val_color}; font-size: 14px; font-weight: 400; padding: 0; background: transparent; border: none;")
+            val.setStyleSheet(f"color: {_val_color}; padding: 0; background: transparent; border: none;")
             vl.addWidget(lbl)
             vl.addWidget(val)
             return container
@@ -1743,6 +1886,9 @@ class MainWindow(FramelessMainWindow):
         if not conn:
             return
 
+        if conn_id in self._automatic_remounts:
+            self._set_status(tr("card.loading.connect"))
+            return
         card = self._cards.get(conn_id)
         if card and card.is_mounted and not self._mgr.get_settings().debug_mode:
             self._show_inline_message(
@@ -1755,6 +1901,9 @@ class MainWindow(FramelessMainWindow):
         if self._panel_conn_id and self._panel_conn_id in self._cards:
             self._cards[self._panel_conn_id].set_info_active(False)
 
+        self._main_stack.setCurrentIndex(0)
+        self._clear_fs_content()
+        self._set_sidebar_active("home")
         self._panel_mode = _PANEL_EDIT
         self._panel_conn_id = conn_id
 
@@ -1796,6 +1945,9 @@ class MainWindow(FramelessMainWindow):
             card.style().unpolish(card)
             card.style().polish(card)
         self._selected_id = None
+        self._main_stack.setCurrentIndex(0)
+        self._clear_fs_content()
+        self._set_sidebar_active("home")
         self._panel_mode = _PANEL_ADD
         self._panel_conn_id = None
 
@@ -1820,11 +1972,10 @@ class MainWindow(FramelessMainWindow):
         self._ensure_panel_sized()
 
     def _open_settings_panel(self):
-        """Show the settings form full-screen. Toggle off if already open."""
-        if not self._guard_leave_form():
-            return
+        """Show settings; clicking its active navigation item is a no-op."""
         if self._panel_mode == _PANEL_SETTINGS:
-            # Ignore duplicate/rapid open requests while already in settings.
+            return
+        if not self._guard_leave_form():
             return
         if self._panel_conn_id and self._panel_conn_id in self._cards:
             self._cards[self._panel_conn_id].set_info_active(False)
@@ -1839,11 +1990,11 @@ class MainWindow(FramelessMainWindow):
         self._main_stack.setCurrentIndex(1)
         self._set_sidebar_active("settings")
 
-    def _open_users_panel(self):
-        """Show user management full-screen. Toggle off if already open."""
+    def _open_users_panel(self, *, refresh: bool = False):
+        """Toggle user management, or explicitly refresh without navigating away."""
         if not self._guard_leave_form():
             return
-        if self._panel_mode == _PANEL_USERS:
+        if self._panel_mode == _PANEL_USERS and not refresh:
             self._nav_home()
             return
         if self._panel_conn_id and self._panel_conn_id in self._cards:
@@ -1866,13 +2017,14 @@ class MainWindow(FramelessMainWindow):
         if not current_user:
             return
 
-        _theme = self._mgr.get_settings().theme or "dark"
-        _is_light = (_theme == "light")
-        _inp_bg    = "#ffffff"  if _is_light else "#0d1117"
-        _inp_bdr   = "#c0cad6" if _is_light else "#30363d"
-        _inp_fg    = "#1a2332" if _is_light else "#deebf7"
-        _lbl_muted = "#5a6a7a" if _is_light else "#8fa4b8"
-        _lbl_bold  = "#1a2332" if _is_light else "#deebf7"
+        _theme = self._current_theme()
+        colors = self._theme_colors()
+        _is_light = not colors["is_dark"]
+        _inp_bg = colors["surface"]
+        _inp_bdr = colors["border"]
+        _inp_fg = colors["text"]
+        _lbl_muted = colors["muted"]
+        _lbl_bold = colors["text"]
         _inp_style = f"background-color: {_inp_bg}; border: 1px solid {_inp_bdr}; border-radius: 6px; padding: 8px; color: {_inp_fg};"
 
         body = QWidget()
@@ -1884,8 +2036,8 @@ class MainWindow(FramelessMainWindow):
         v.setSpacing(16)
 
         # User info section
-        _title_color  = "#1a2332" if _is_light else "#deebf7"
-        _pill_bg      = "#0077b6"
+        _title_color = colors["text"]
+        _pill_bg = colors["accent"]
 
         def _section_card(title: str, pill_text: str = ""):
             frame = QFrame()
@@ -2012,7 +2164,7 @@ class MainWindow(FramelessMainWindow):
         v.addWidget(pw_card)
         v.addStretch()
 
-        self._fs_layout.addWidget(body)
+        self._fs_layout.addWidget(self._wrap_fullscreen_body(body, max_width=820))
 
     def _save_profile_form(self):
         """Save password change from profile form."""
@@ -2272,7 +2424,7 @@ class MainWindow(FramelessMainWindow):
         v.addLayout(columns)
 
         v.addStretch()
-        self._fs_layout.addWidget(body, stretch=1)
+        self._fs_layout.addWidget(self._wrap_fullscreen_body(body, max_width=1180), stretch=1)
 
     def _uf_add_user(self):
         from src.auth_manager import AuthManager
@@ -2286,7 +2438,7 @@ class MainWindow(FramelessMainWindow):
             return
         try:
             AuthManager.register(username, pw, is_admin=self._uf_is_admin.isChecked())
-            self._open_users_panel()
+            self._open_users_panel(refresh=True)
         except Exception as e:
             self._set_status(str(e))
 
@@ -2295,17 +2447,17 @@ class MainWindow(FramelessMainWindow):
         if StyledMessageBox.question(
             self, tr("users.delete.title"),
             tr("users.delete.confirm", name=username),
-            yes_text="Löschen", no_text="Abbrechen"
+            yes_text=tr("main.delete"), no_text=tr("dialog.cancel"), destructive=True
         ):
             AuthManager.delete_user(user_id)
-            self._open_users_panel()
+            self._open_users_panel(refresh=True)
 
     def _uf_reset_password(self, user_id: str, username: str):
         from src.auth_manager import AuthManager
         if not StyledMessageBox.question(
             self, tr("users.reset.title"),
             tr("users.reset.confirm", name=username),
-            yes_text="Zurücksetzen", no_text="Abbrechen"
+            yes_text=tr("dialog.reset"), no_text=tr("dialog.cancel"), destructive=True
         ):
             return
         new_pw = AuthManager.admin_reset_password(user_id)
@@ -2380,7 +2532,7 @@ class MainWindow(FramelessMainWindow):
 
         # Status badge — identical to info panel so the transition feels seamless
         if is_edit:
-            _theme = self._mgr.get_settings().theme or "dark"
+            _theme = self._current_theme()
             is_mounted = (conn.id in self._cards and self._cards[conn.id].is_mounted)
             status_row = QHBoxLayout()
             status_row.setSpacing(12)
@@ -2669,6 +2821,10 @@ class MainWindow(FramelessMainWindow):
 
         # PuTTY (only when enabled globally)
         s = self._mgr.get_settings()
+        # Bind the value even when its editor is hidden for another backend.
+        self._ef_putty_key = QLineEdit(conn.putty_key_path if is_edit else "")
+        self._ef_putty_key.setParent(body)
+        self._ef_putty_key.hide()
         self._ef_putty_widget = None
         if s.use_putty:
             self._ef_putty_widget = QWidget()
@@ -2680,7 +2836,7 @@ class MainWindow(FramelessMainWindow):
             putty_hl = QHBoxLayout(putty_container)
             putty_hl.setContentsMargins(0, 0, 0, 0)
             putty_hl.setSpacing(6)
-            self._ef_putty_key = QLineEdit(conn.putty_key_path if is_edit else "")
+            self._ef_putty_key.show()
             self._ef_putty_key.setPlaceholderText("C:/Users/user/.ssh/id_rsa.ppk")
             putty_hl.addWidget(self._ef_putty_key, stretch=1)
             putty_browse_btn = QPushButton("…")
@@ -2822,7 +2978,7 @@ class MainWindow(FramelessMainWindow):
         templates = self._mgr.get_templates()
         if not templates:
             return
-        theme = self._mgr.get_settings().theme or "dark"
+        theme = self._current_theme()
         btn = self._ef_template_btn
         if btn is None:
             return
@@ -2928,6 +3084,7 @@ class MainWindow(FramelessMainWindow):
             self,
             tr("addedit.template.delete.title"),
             tr("addedit.template.delete.confirm", name=name),
+            destructive=True,
         )
         if not confirmed:
             return
@@ -3324,40 +3481,12 @@ class MainWindow(FramelessMainWindow):
         v.addWidget(_section_hdr(tr("settings.section.mount")))
         v.addSpacing(4)
 
-        self._sf_interval_unit = NoWheelComboBox()
-        self._sf_interval_unit.setFixedWidth(90)
-        self._sf_interval_unit.addItem(tr("settings.interval.seconds"), "s")
-        self._sf_interval_unit.addItem(tr("settings.interval.minutes"), "m")
-        self._sf_interval_unit.addItem(tr("settings.interval.hours"), "h")
-        # Capsule-style stepper: [-] [value] [+]
-        # NOTE: All styling lives in the theme .qss files (selectors:
-        # #intervalStepper, #intervalMinusBtn, #intervalPlusBtn). We must
-        # NOT call setStyleSheet() here — inline widget QSS takes priority
-        # over the app-level theme QSS, so hardcoding colors would break
-        # dark mode. Theme switching works automatically because
-        # apply_theme() replaces the app stylesheet.
-        self._sf_interval_stepper = QWidget()
-        self._sf_interval_stepper.setObjectName("intervalStepper")
-        self._sf_interval_stepper.setFixedHeight(32)
-        _stepper_hl = QHBoxLayout(self._sf_interval_stepper)
-        _stepper_hl.setContentsMargins(0, 0, 0, 0)
-        _stepper_hl.setSpacing(0)
-        self._sf_interval_minus_btn = QPushButton("-")
-        self._sf_interval_minus_btn.setObjectName("intervalMinusBtn")
-        self._sf_interval_minus_btn.setFixedSize(36, 32)
-        self._sf_interval_minus_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._sf_interval_value = NoWheelSpinBox()
-        self._sf_interval_value.setFixedWidth(60)
-        self._sf_interval_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._sf_interval_plus_btn = QPushButton("+")
-        self._sf_interval_plus_btn.setObjectName("intervalPlusBtn")
-        self._sf_interval_plus_btn.setFixedSize(36, 32)
-        self._sf_interval_plus_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        _stepper_hl.addWidget(self._sf_interval_minus_btn)
-        _stepper_hl.addWidget(self._sf_interval_value)
-        _stepper_hl.addWidget(self._sf_interval_plus_btn)
-        self._sf_interval_minus_btn.clicked.connect(self._sf_interval_value.stepDown)
-        self._sf_interval_plus_btn.clicked.connect(self._sf_interval_value.stepUp)
+        interval_controls = IntervalInput()
+        self._sf_interval_stepper = interval_controls.stepper
+        self._sf_interval_value = interval_controls.value
+        self._sf_interval_unit = interval_controls.unit
+        self._sf_interval_minus_btn = interval_controls.decrease
+        self._sf_interval_plus_btn = interval_controls.increase
         # Convert seconds to best unit
         _secs = getattr(s, 'check_interval_seconds', 30) or 30
         if _secs >= 3600 and _secs % 3600 == 0:
@@ -3384,13 +3513,13 @@ class MainWindow(FramelessMainWindow):
         interval_row = QWidget()
         interval_row.setObjectName("settingsRow")
         interval_hl = QHBoxLayout(interval_row)
-        interval_hl.setContentsMargins(16, 11, 16, 11)
-        interval_hl.setSpacing(8)
+        interval_hl.setContentsMargins(16, 8, 16, 8)
+        interval_hl.setSpacing(12)
         interval_lbl = QLabel(tr("settings.check_interval"))
         interval_lbl.setObjectName("rowLabel")
-        interval_hl.addWidget(interval_lbl, stretch=1)
-        interval_hl.addWidget(self._sf_interval_stepper)
-        interval_hl.addWidget(self._sf_interval_unit)
+        interval_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        interval_hl.addWidget(interval_lbl, stretch=1, alignment=Qt.AlignmentFlag.AlignVCenter)
+        interval_hl.addWidget(interval_controls, 0, Qt.AlignmentFlag.AlignVCenter)
         mnt_vl.addWidget(interval_row)
         mnt_vl.addWidget(_inner_sep())
         mnt_vl.addWidget(_row_check(self._sf_auto_reconnect))
@@ -3554,7 +3683,7 @@ class MainWindow(FramelessMainWindow):
         v.addSpacing(14)
 
         v.addStretch()
-        self._fs_layout.addWidget(body)
+        self._fs_layout.addWidget(self._wrap_fullscreen_body(body, max_width=1080))
 
     def _sf_get_interval_seconds(self) -> int:
         """Convert interval value + unit to seconds."""
@@ -3681,9 +3810,6 @@ class MainWindow(FramelessMainWindow):
             app = QApplication.instance()
             if app:
                 get_theme_manager().apply_theme(app, theme_name)
-            if hasattr(self, '_mgr'):
-                s = self._mgr.get_settings()
-                s.theme = theme_name
 
     def _sf_import_theme(self):
         """Import a .qss theme file into the user themes directory."""
@@ -3873,7 +3999,7 @@ class MainWindow(FramelessMainWindow):
         else:
             self._on_mount(conn_id)
 
-    def _safe_lineedit_text(self, attr_name: str) -> str:
+    def _safe_lineedit_text(self, attr_name: str, *, strip: bool = True) -> str:
         """
         Return text from a potentially stale QLineEdit attribute.
         If the wrapped Qt object was already deleted, return empty string.
@@ -3882,7 +4008,8 @@ class MainWindow(FramelessMainWindow):
         if widget is None:
             return ""
         try:
-            return widget.text().strip()
+            text = widget.text()
+            return text.strip() if strip else text
         except RuntimeError:
             return ""
 
@@ -3938,7 +4065,7 @@ class MainWindow(FramelessMainWindow):
             "path": self._safe_lineedit_text("_ef_path"),
             "port": self._safe_spin_value("_ef_port", 22),
             "auth": self._safe_current_data("_ef_auth", "password"),
-            "password": self._safe_lineedit_text("_ef_pw"),
+            "password": self._safe_lineedit_text("_ef_pw", strip=False),
             "key": self._safe_lineedit_text("_ef_key"),
             "putty_key": self._safe_lineedit_text("_ef_putty_key"),
             "drive": self._safe_current_data("_ef_drive", "AUTO"),
@@ -3988,13 +4115,13 @@ class MainWindow(FramelessMainWindow):
         return self._snapshot_settings_form() != self._settings_initial_snapshot
 
     def _ask_settings_dirty_action(self) -> str:
-        dlg = QDialog(self)
+        dlg = FramelessDialog(self)
         dlg.setObjectName("dialogSurface")
         dlg.setWindowTitle(tr("dirty.title"))
         dlg.setModal(True)
         dlg.setMinimumWidth(420)
 
-        layout = QVBoxLayout(dlg)
+        layout = QVBoxLayout(dlg._fdlg_content)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
 
@@ -4035,6 +4162,8 @@ class MainWindow(FramelessMainWindow):
         return "cancel"
 
     def _guard_leave_form(self) -> bool:
+        if getattr(self, "_shutdown_requested", False):
+            return False
         if self._leave_guard_active:
             # Drop re-entrant navigation calls to avoid double-trigger side effects.
             return False
@@ -4061,6 +4190,11 @@ class MainWindow(FramelessMainWindow):
                 if action == "apply":
                     if not self._save_settings_form(navigate_home=False):
                         return False
+                elif action == "discard":
+                    from src.theme_manager import get_theme_manager
+                    get_theme_manager().apply_theme(
+                        QApplication.instance(), self._mgr.get_settings().theme or "dark"
+                    )
                 self._settings_initial_snapshot = None
                 return True
 
@@ -4216,20 +4350,23 @@ class MainWindow(FramelessMainWindow):
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setSpacing(4)
         self._ef_icon_btns = {}
+        colors = self._theme_colors()
 
         icon_names = self._ef_get_icon_names()
         for idx, name in enumerate(icon_names):
             btn = QPushButton()
+            btn.setObjectName("connectionIconChoiceBtn")
             btn.setFixedSize(36, 36)
             btn.setCheckable(True)
             btn.setChecked(self._ef_icon_name == name)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             if name:
-                btn.setIcon(svg_icon(name, "#aab4c4", 22))
+                icon_color = colors["accent"] if self._ef_icon_name == name else colors["muted"]
+                btn.setIcon(svg_icon(name, icon_color, 22))
                 display = name[7:] if name.startswith("custom:") else name
                 btn.setToolTip(display)
             else:
-                btn.setIcon(svg_icon("cloud", "#aab4c4", 22))
+                btn.setIcon(svg_icon("cloud", colors["muted"], 22))
                 btn.setToolTip(tr("addedit.icon.default"))
             btn.clicked.connect(lambda checked, n=name: self._ef_select_icon(n))
             self._ef_icon_btns[name] = btn
@@ -4238,22 +4375,12 @@ class MainWindow(FramelessMainWindow):
 
         # Dashed-border square button with centered SVG plus for importing icons
         add_btn = QPushButton()
+        add_btn.setObjectName("iconImportBtn")
         add_btn.setFixedSize(36, 36)
         add_btn.setIconSize(QSize(20, 20))
-        add_btn.setIcon(svg_icon("plus", "#aab4c4", 20))
+        add_btn.setIcon(svg_icon("plus", colors["muted"], 20))
         add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         add_btn.setToolTip(tr("addedit.icon.import"))
-        add_btn.setStyleSheet("""
-            QPushButton {
-                border: 2px dashed #aab4c4;
-                border-radius: 8px;
-                background: transparent;
-                padding: 0px;
-            }
-            QPushButton:hover {
-                border-color: #00b4d8;
-            }
-        """)
         add_btn.clicked.connect(self._ef_import_custom_icon)
         row, col = divmod(len(icon_names), 9)
         grid.addWidget(add_btn, row, col)
@@ -4322,7 +4449,7 @@ class MainWindow(FramelessMainWindow):
             remote_path=self._safe_lineedit_text("_ef_path") or "/",
             port=self._safe_spin_value("_ef_port", 22),
             auth_method=self._safe_current_data("_ef_auth", "password"),
-            password=self._safe_lineedit_text("_ef_pw"),
+            password=self._safe_lineedit_text("_ef_pw", strip=False),
             groups=self._safe_lineedit_text("_ef_groups"),
             is_template=is_template,
             icon_name=getattr(self, "_ef_icon_name", ""),
@@ -4366,7 +4493,7 @@ class MainWindow(FramelessMainWindow):
             remote_path=self._safe_lineedit_text("_ef_path") or "/",
             port=self._safe_spin_value("_ef_port", 22),
             auth_method=self._safe_current_data("_ef_auth", "password"),
-            password="" if is_tpl else self._safe_lineedit_text("_ef_pw"),
+            password="" if is_tpl else self._safe_lineedit_text("_ef_pw", strip=False),
             groups=self._safe_lineedit_text("_ef_groups"),
             is_template=is_tpl,
             icon_name=getattr(self, "_ef_icon_name", ""),
@@ -4422,7 +4549,24 @@ class MainWindow(FramelessMainWindow):
             allow_insecure_password_auth=_sec >= 2,
             sshfs_disable_cache=self._sf_sshfs_disable_cache.isChecked(),
         )
-        self._mgr.save_settings(new_settings)
+        from src.startup_settings import apply_startup_preferences
+        try:
+            rollback_startup = apply_startup_preferences(
+                new_settings.start_with_windows, new_settings.require_admin
+            )
+        except Exception as error:
+            self._err_popup(tr("dialog.error"), str(error))
+            return False
+        try:
+            self._mgr.save_settings(new_settings)
+        except Exception as error:
+            message = str(error)
+            try:
+                rollback_startup()
+            except Exception as rollback_error:
+                message += "\n" + str(rollback_error)
+            self._err_popup(tr("dialog.error"), message)
+            return False
         self._apply_settings_object(new_settings)
         self._settings_initial_snapshot = self._snapshot_settings_form()
         self._set_status(tr("status.settings_saved"))
@@ -4444,13 +4588,13 @@ class MainWindow(FramelessMainWindow):
         """Error dialog with a copy-to-clipboard button. Also persists title+first line in status bar."""
         self._set_error_status(f"⚠ {title}: {message.splitlines()[0]}")
 
-        dlg = QDialog(self)
+        dlg = FramelessDialog(self)
         dlg.setObjectName("dialogSurface")
         dlg.setWindowTitle(title)
         dlg.setModal(True)
         dlg.setMinimumWidth(420)
 
-        layout = QVBoxLayout(dlg)
+        layout = QVBoxLayout(dlg._fdlg_content)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
 
@@ -4471,7 +4615,7 @@ class MainWindow(FramelessMainWindow):
         copy_btn.setFixedSize(32, 32)
         copy_btn.setIcon(svg_icon("copy", "#aab4c4", 16))
         copy_btn.setIconSize(QSize(16, 16))
-        copy_btn.setToolTip("Fehlermeldung kopieren")
+        copy_btn.setToolTip(tr("error.copy"))
         copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         _clip_text = f"{title}\n\n{message}"
         copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(_clip_text))
@@ -4494,13 +4638,13 @@ class MainWindow(FramelessMainWindow):
 
     def _show_mount_failure_dialog(self, conn: Connection | None, message: str) -> bool:
         """Show a richer failure dialog that mirrors the website demo's guidance blocks."""
-        dialog = QDialog(self)
+        dialog = FramelessDialog(self)
         dialog.setObjectName("mountErrorDialog")
         dialog.setWindowTitle(tr("mount.failed.title"))
         dialog.setModal(True)
         dialog.setMinimumWidth(540)
 
-        outer = QVBoxLayout(dialog)
+        outer = QVBoxLayout(dialog._fdlg_content)
         outer.setContentsMargins(20, 18, 20, 18)
         outer.setSpacing(12)
 
@@ -4623,8 +4767,13 @@ class MainWindow(FramelessMainWindow):
     # ------------------------------------------------------------------
 
     def _poll_mount_states(self):
+        if self._shutdown_requested:
+            return
         mounted_map = self._controller.get_mounted_drives()
         mounted_set = {k.upper().rstrip("\\") for k in mounted_map.keys()}
+        remount_enabled = self._mgr.get_settings().auto_remount_on_lost
+        if not remount_enabled:
+            self._lost_mounts.clear()
 
         for conn_id, card in self._cards.items():
             conn = card.connection
@@ -4634,6 +4783,11 @@ class MainWindow(FramelessMainWindow):
             if not letter_key.endswith(":"):
                 letter_key += ":"
             is_mounted_now = letter_key in mounted_set
+            if is_mounted_now:
+                self._lost_mounts.pop(conn_id, None)
+            elif (remount_enabled and card.is_mounted
+                  and conn_id not in self._workers and not self._explicit_quit):
+                self._lost_mounts.setdefault(conn_id, (0, 0.0))
             if is_mounted_now != card.is_mounted:
                 card.update_mount_state(is_mounted_now)
                 # Refresh open panel for this connection on mount state change
@@ -4641,9 +4795,43 @@ class MainWindow(FramelessMainWindow):
                     if self._panel_mode == _PANEL_INFO:
                         self._open_info_panel(conn_id)
                     elif self._panel_mode == _PANEL_SYSINFO:
-                        self._open_sysinfo_panel(conn_id)
+                        self._open_sysinfo_panel(conn_id, reuse_auth=True)
 
+        if remount_enabled and not self._explicit_quit:
+            for conn_id in list(self._lost_mounts):
+                self._start_automatic_remount(conn_id)
         self._update_status()
+        self._apply_group_filter()
+
+    def _start_automatic_remount(self, conn_id: str) -> None:
+        """Retry observed mount loss without modal auth/failure prompts."""
+        import time
+        if (getattr(self, "_shutdown_requested", False)
+                or conn_id in self._workers or conn_id not in self._lost_mounts
+                or conn_id in getattr(self, "_deleting_connections", set())):
+            return
+        if (getattr(self, "_panel_mode", None) == _PANEL_EDIT
+                and getattr(self, "_panel_conn_id", None) == conn_id):
+            return
+        attempts, due = self._lost_mounts[conn_id]
+        if time.monotonic() < due:
+            return
+        conn = self._mgr.get_by_id(conn_id)
+        if (conn is None or conn.is_ftp or conn.auth_method == "ask"
+                or (conn.auth_method == "password" and not conn.password)):
+            self._lost_mounts.pop(conn_id, None)
+            return
+        delay = min(300, 15 * (2 ** min(attempts, 5)))
+        self._lost_mounts[conn_id] = (attempts + 1, time.monotonic() + delay)
+        worker = MountWorker(
+            conn, self._controller,
+            disable_cache=self._mgr.get_settings().sshfs_disable_cache,
+        )
+        worker.result_ready.connect(self._on_mount_finished)
+        self._automatic_remounts.add(conn_id)
+        self._workers[conn_id] = worker
+        self._track_background_worker(worker)
+        worker.start()
 
     # ------------------------------------------------------------------
     # Action slots
@@ -4660,6 +4848,19 @@ class MainWindow(FramelessMainWindow):
         self._delete_connection(conn_id)
 
     def _delete_connection(self, conn_id: str):
+        if conn_id in self._workers or conn_id in self._deleting_connections:
+            self._set_status(tr("action.busy"))
+            return
+        self._deleting_connections.add(conn_id)
+        try:
+            self._confirm_delete_connection(conn_id)
+        finally:
+            self._deleting_connections.discard(conn_id)
+
+    def _confirm_delete_connection(self, conn_id: str):
+        if conn_id in self._workers:
+            self._set_status(tr("action.busy"))
+            return
         conn = self._mgr.get_by_id(conn_id)
         if not conn:
             return
@@ -4668,7 +4869,7 @@ class MainWindow(FramelessMainWindow):
             if not StyledMessageBox.question(
                 self, tr("delete.title"),
                 tr("delete.mounted_confirm", name=conn.name),
-                yes_text=tr("delete.anyway"), no_text=tr("dialog.cancel")
+                yes_text=tr("delete.anyway"), no_text=tr("dialog.cancel"), destructive=True
             ):
                 return
             self._controller.unmount(conn.drive_letter)
@@ -4676,7 +4877,7 @@ class MainWindow(FramelessMainWindow):
             if not StyledMessageBox.question(
                 self, tr("delete.title"),
                 tr("delete.confirm", name=conn.name),
-                yes_text=tr("main.delete"), no_text=tr("dialog.cancel")
+                yes_text=tr("main.delete"), no_text=tr("dialog.cancel"), destructive=True
             ):
                 return
         # Show overlay to cover the list-rebuild flicker.
@@ -4685,7 +4886,13 @@ class MainWindow(FramelessMainWindow):
         from PyQt6.QtWidgets import QApplication as _QApp
         _QApp.processEvents()
         try:
+            # Modal confirmation/processEvents may have started a background retry.
+            if conn_id in self._workers:
+                self._set_status(tr("action.busy"))
+                return
             self._mgr.delete(conn_id)
+            self._lost_mounts.pop(conn_id, None)
+            self._teardown_all_terminal_sessions(conn_id)
             self._close_right_panel_force()
             self._refresh_list()
             self._set_status(tr("status.connection_deleted", name=conn.name))
@@ -4697,7 +4904,7 @@ class MainWindow(FramelessMainWindow):
         conn = copy.copy(conn)
 
         if conn.auth_method == "ask":
-            has_key = bool(conn.key_path)
+            has_key = bool(conn.key_path or conn.putty_key_path)
             dlg = _AuthMethodDialog(
                 self,
                 conn.name,
@@ -4709,10 +4916,10 @@ class MainWindow(FramelessMainWindow):
             conn.auth_method = dlg.selected_auth_method()
 
         if conn.auth_method == "password" and not conn.password:
-            pw, ok = QInputDialog.getText(
+            pw, ok = StyledInputDialog.get_text(
                 self, tr("auth.enter_password.title"),
                 tr("auth.enter_password.prompt", name=conn.name),
-                QLineEdit.EchoMode.Password,
+                password=True,
             )
             if not ok:
                 return None
@@ -4740,7 +4947,7 @@ class MainWindow(FramelessMainWindow):
 
     @pyqtSlot(str)
     def _on_mount(self, conn_id: str):
-        if conn_id in self._workers:
+        if self._shutdown_requested or conn_id in self._workers or conn_id in self._deleting_connections:
             return
         conn = self._mgr.get_by_id(conn_id)
         if not conn:
@@ -4759,18 +4966,24 @@ class MainWindow(FramelessMainWindow):
             card.show_loading(tr("card.loading.connect"))
         _disable_cache = bool(getattr(self._mgr.get_settings(), "sshfs_disable_cache", False))
         worker = MountWorker(conn, self._controller, disable_cache=_disable_cache)
-        worker.finished.connect(self._on_mount_finished)
+        worker.result_ready.connect(self._on_mount_finished)
         self._workers[conn_id] = worker
+        self._track_background_worker(worker)
         worker.start()
 
     def _on_mount_finished(self, conn_id: str, result):
-        if conn_id in self._workers:
-            self._workers[conn_id].deleteLater()
-            del self._workers[conn_id]
+        automatic = conn_id in self._automatic_remounts
+        self._automatic_remounts.discard(conn_id)
+        if result.success:
+            self._lost_mounts.pop(conn_id, None)
+        self._workers.pop(conn_id, None)
         conn = self._mgr.get_by_id(conn_id)
         card = self._cards.get(conn_id)
         if card:
             card.hide_loading()
+        if self._shutdown_requested and not result.success:
+            logger.warning("Mount failed while shutting down: %s", result.message)
+            return
         if result.success:
             # Persist the resolved drive letter when the connection was set to AUTO
             if result.drive_letter and conn and conn.drive_letter.upper() == "AUTO":
@@ -4784,17 +4997,22 @@ class MainWindow(FramelessMainWindow):
             self._save_active_mount(conn_id, True)
             if conn:
                 self._set_status(tr("status.connected", name=conn.name, drive=conn.drive_letter))
-            if self._panel_conn_id == conn_id:
+            if not self._shutdown_requested and self._panel_conn_id == conn_id:
                 # Keep header mount state and panel content in sync.
                 # EDIT mode: close edit panel and show info (can't edit a mounted connection).
                 if self._panel_mode in (_PANEL_INFO, _PANEL_EDIT):
                     self._open_info_panel(conn_id)
                 elif self._panel_mode == _PANEL_SYSINFO:
-                    self._open_sysinfo_panel(conn_id)
+                    self._open_sysinfo_panel(conn_id, reuse_auth=True)
                 else:
                     self._sync_rp_mount_button(conn_id)
         else:
             name = conn.name if conn else "?"
+            if automatic:
+                self._set_status(tr("status.connect_failed", name=name))
+                logger.warning("Automatic remount failed for %s: %s", conn_id, result.message)
+                self._apply_group_filter()
+                return
             # SSH Key Fallback: Wenn Key fehlschlägt aber Passwort hinterlegt ist
             if conn and conn.auth_method == "key" and conn.password:
                 if self._show_key_fallback_dialog(conn):
@@ -4820,7 +5038,7 @@ class MainWindow(FramelessMainWindow):
 
     def _retry_mount_with_password(self, conn_id: str, conn):
         """Retry mount with password authentication."""
-        if conn_id in self._workers:
+        if self._shutdown_requested or conn_id in self._workers or conn_id in self._deleting_connections:
             return
         self._set_status(tr("status.connecting", name=conn.name, drive=conn.drive_letter))
         card = self._cards.get(conn_id)
@@ -4828,12 +5046,16 @@ class MainWindow(FramelessMainWindow):
             card.show_loading(tr("card.loading.connect"))
         _disable_cache = bool(getattr(self._mgr.get_settings(), "sshfs_disable_cache", False))
         worker = MountWorker(conn, self._controller, disable_cache=_disable_cache)
-        worker.finished.connect(self._on_mount_finished)
+        worker.result_ready.connect(self._on_mount_finished)
         self._workers[conn_id] = worker
+        self._track_background_worker(worker)
         worker.start()
 
     @pyqtSlot(str)
     def _on_unmount(self, conn_id: str):
+        if self._shutdown_requested:
+            return
+        self._lost_mounts.pop(conn_id, None)
         if conn_id in self._workers:
             return
         conn = self._mgr.get_by_id(conn_id)
@@ -4844,18 +5066,14 @@ class MainWindow(FramelessMainWindow):
         if card:
             card.show_loading(tr("card.loading.disconnect"))
         worker = UnmountWorker(conn_id, conn.drive_letter, self._controller)
-        worker.finished.connect(self._on_unmount_finished)
+        worker.result_ready.connect(self._on_unmount_finished)
         self._workers[conn_id] = worker
+        self._track_background_worker(worker)
         worker.start()
 
     def _on_unmount_finished(self, conn_id: str, result):
-        try:
-            worker = self._workers.pop(conn_id, None)
-            if worker is not None:
-                worker.finished.disconnect()
-                worker.deleteLater()
-        except Exception as e:
-            logger.warning(f"Unmount worker cleanup error: {e}")
+        # Native completion/reaper owns QThread destruction, not this result slot.
+        self._workers.pop(conn_id, None)
 
         try:
             conn = self._mgr.get_by_id(conn_id)
@@ -4868,17 +5086,20 @@ class MainWindow(FramelessMainWindow):
                 self._save_active_mount(conn_id, False)
                 self._set_status(tr("status.disconnected", name=conn.name if conn else "?"))
                 try:
-                    if self._panel_conn_id == conn_id:
+                    if not self._shutdown_requested and self._panel_conn_id == conn_id:
                         if self._panel_mode == _PANEL_INFO:
                             self._open_info_panel(conn_id)
                         elif self._panel_mode == _PANEL_SYSINFO:
-                            self._open_sysinfo_panel(conn_id)
+                            self._open_sysinfo_panel(conn_id, reuse_auth=True)
                         else:
                             self._sync_rp_mount_button(conn_id)
                 except Exception as e:
                     logger.warning(f"Panel refresh after unmount failed: {e}")
             else:
-                self._err_popup(tr("unmount.failed.title"), result.message)
+                if not self._shutdown_requested:
+                    self._err_popup(tr("unmount.failed.title"), result.message)
+                else:
+                    logger.warning("Unmount failed while shutting down: %s", result.message)
                 if conn:
                     self._set_status(tr("status.disconnect_failed", name=conn.name))
         except Exception as e:
@@ -4893,6 +5114,8 @@ class MainWindow(FramelessMainWindow):
     @pyqtSlot(str)
     def _on_ssh_requested(self, conn_id: str):
         """Dispatcher: routes to integrated xterm panel or external SSH client."""
+        if self._shutdown_requested:
+            return
         if self._reject_ftp_action(self._mgr.get_by_id(conn_id), "ftp.ssh_unsupported"):
             return
         settings = self._mgr.get_settings()
@@ -4903,6 +5126,8 @@ class MainWindow(FramelessMainWindow):
 
     @pyqtSlot(str)
     def _on_ssh_terminal(self, conn_id: str):
+        if self._shutdown_requested:
+            return
         conn = self._mgr.get_by_id(conn_id)
         if not conn:
             return
@@ -4920,6 +5145,8 @@ class MainWindow(FramelessMainWindow):
             self._err_popup("SSH-Terminal", error)
 
     def _on_ssh_terminal_with_backend(self, conn_id: str, backend: str):
+        if self._shutdown_requested:
+            return
         if self._reject_ftp_action(self._mgr.get_by_id(conn_id), "ftp.ssh_unsupported"):
             return
         if backend == "xterm":
@@ -4953,6 +5180,8 @@ class MainWindow(FramelessMainWindow):
         In mounted_only mode an SFTP connection must be mounted; FTP hosts are
         never mounted, so the requirement does not apply to them.
         """
+        if self._shutdown_requested:
+            return
         conn = self._mgr.get_by_id(conn_id)
         if not conn:
             return
@@ -4978,10 +5207,11 @@ class MainWindow(FramelessMainWindow):
             return
 
         from src.ui.sftp_browser import SftpBrowserWindow
-        theme = self._mgr.get_settings().theme or "dark"
+        theme = self._current_theme()
         browser = SftpBrowserWindow(conn, theme=theme, parent=self)
         browser.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         browser.destroyed.connect(lambda: self._sftp_browsers.pop(conn_id, None))
+        browser.shutdown_failed.connect(self._cancel_shutdown)
         self._sftp_browsers[conn_id] = browser
         browser.show()
         if conn.is_ftp:
@@ -5197,6 +5427,35 @@ class MainWindow(FramelessMainWindow):
         s = self._mgr.get_settings()
         self._apply_settings_object(s)
 
+    def _current_theme(self) -> str:
+        from src.theme_manager import get_theme_manager
+        return get_theme_manager().current_theme
+
+    def _theme_colors(self) -> dict:
+        from src.theme_manager import get_theme_manager
+        return get_theme_manager().get_colors()
+
+    def _on_theme_changed(self, theme: str) -> None:
+        self.set_app_theme(theme)
+        active = {
+            _PANEL_SETTINGS: "settings", _PANEL_USERS: "users", _PANEL_PROFILE: "profile"
+        }.get(self._panel_mode, "home")
+        self._set_sidebar_active(active)
+        self._update_header_btn_icons(theme)
+        self._sync_group_filter_menu()
+        for index in range(self._rp_layout.count()):
+            widget = self._rp_layout.itemAt(index).widget()
+            if widget is not None and hasattr(widget, "set_theme"):
+                widget.set_theme(theme)
+        if self._panel_mode in (_PANEL_ADD, _PANEL_EDIT) and hasattr(self, "_ef_icon_scroll"):
+            self._ef_refresh_icon_grid()
+        for conn_id, card in list(self._cards.items()):
+            card.set_theme(theme)
+            self._update_card_terminal_indicator(conn_id)
+        for browser in list(self._sftp_browsers.values()):
+            if not sip.isdeleted(browser):
+                browser.set_theme(theme)
+
     def _apply_settings_object(self, s: AppSettings):
         interval = s.check_interval_seconds * 1000
         if self._poll_timer.interval() != interval:
@@ -5204,34 +5463,32 @@ class MainWindow(FramelessMainWindow):
         self._apply_debug_mode()
         from src.theme_manager import get_theme_manager
         theme = s.theme or "dark"
+        # The successful apply notification refreshes all chrome/consumers,
+        # using the actual resolved fallback theme rather than the requested name.
         get_theme_manager().apply_theme(QApplication.instance(), theme)
-        self.set_app_theme(theme)          # update custom titlebar palette
-        self._apply_titlebar_color(theme)  # kept for any residual DWM calls
-        self._update_header_btn_icons(theme)
-        # Repaint sidebar icon colors for current theme and active item.
-        if self._panel_mode == _PANEL_SETTINGS:
-            self._set_sidebar_active("settings")
-        elif self._panel_mode == _PANEL_USERS:
-            self._set_sidebar_active("users")
-        elif self._panel_mode == _PANEL_PROFILE:
-            self._set_sidebar_active("profile")
-        else:
-            self._set_sidebar_active("home")
 
     def _update_header_btn_icons(self, theme: str):
-        if theme == "light":
-            del_color  = "#b91c1c"
-            save_color = "#16a34a"
-        else:
-            del_color  = "#ffffff"
-            save_color = "#ffffff"
-        self._rp_del_btn.setIcon(svg_icon("trash", del_color, 15))
-        self._rp_save_top_btn.setIcon(svg_icon("floppy", save_color, 15))
+        from src.theme_manager import get_theme_manager
+        colors = get_theme_manager().get_colors(theme)
+        danger = "#e77783" if colors["is_dark"] else "#bb3c4b"
+        muted = colors["muted"]
+        accent = colors["accent"]
+        self._add_btn.setIcon(svg_icon("plus", "#ffffff", 16))
+        self._mount_all_btn.setIcon(svg_icon("cloud", accent, 16))
+        self._dismount_all_btn.setIcon(svg_icon("x", danger, 16))
+        self._rp_info_btn.setIcon(svg_icon("info", muted, 15))
+        self._rp_edit_btn.setIcon(svg_icon("edit", muted, 15))
+        self._rp_terminal_btn.setIcon(svg_icon("terminal", muted, 15))
+        self._rp_del_btn.setIcon(svg_icon("trash", danger, 15))
+        self._rp_save_top_btn.setIcon(svg_icon("floppy", "#ffffff", 15))
+        self._rp_cancel_top_btn.setIcon(svg_icon("x", muted, 15))
+        self._rp_new_session_btn.setIcon(svg_icon("plus", muted, 15))
+        self._rp_close_btn.setIcon(svg_icon("x", muted, 15))
 
     def _apply_titlebar_color(self, theme: str = None):
         """Update the custom titlebar theme (replaces the former DWM caption-colour hack)."""
         if theme is None:
-            theme = (self._mgr.get_settings().theme or "dark")
+            theme = (self._current_theme())
         self.set_app_theme(theme)
 
     def _apply_debug_mode(self):
@@ -5266,9 +5523,10 @@ class MainWindow(FramelessMainWindow):
         result = LogoutConfirmDialog.ask(self)
         if result == "cancel":
             return
-        # "logout" unmounts all; "quit" keeps hosts mounted
-        Session.logout()
-        self.quit_app(unmount=(result == "logout"))
+        # Keep the authenticated session valid until all saves/workers drain.
+        self._logout_on_shutdown = True
+        if not self.quit_app(unmount=(result == "logout")):
+            self._logout_on_shutdown = False
 
     def _on_profile(self):
         """Show user profile panel for password change."""
@@ -5297,33 +5555,142 @@ class MainWindow(FramelessMainWindow):
     # Window close
     # ------------------------------------------------------------------
 
-    def quit_app(self, unmount: bool = True):
-        """Proper shutdown: optionally unmount drives, stop bridge, then quit."""
-        self._explicit_quit = True
-        if unmount:
-            self._shutdown_disconnect_all()
-        if self._bridge_server:
+    def _track_background_worker(self, worker: QThread, *, delete_when_done: bool = True) -> None:
+        """Hold a strong reference independently of payload/result callbacks."""
+        if delete_when_done:
+            self._borrowed_workers.discard(worker)
+        elif worker not in self._tracked_workers:
+            self._borrowed_workers.add(worker)
+        if worker in self._tracked_workers:
+            return
+        self._tracked_workers.add(worker)
+        worker.finished.connect(self._reap_finished_workers)
+        if not self._worker_reaper_timer.isActive():
+            self._worker_reaper_timer.start()
+
+    @pyqtSlot()
+    def _reap_finished_workers(self) -> None:
+        for worker in list(self._tracked_workers):
             try:
-                self._bridge_server.stop()
-            except Exception:
-                pass
+                stopped = not worker.isRunning() and worker.isFinished() and worker.wait(0)
+            except RuntimeError:
+                self._tracked_workers.discard(worker)
+                self._borrowed_workers.discard(worker)
+                continue
+            if stopped:
+                self._tracked_workers.discard(worker)
+                if worker not in self._borrowed_workers:
+                    worker.deleteLater()
+                self._borrowed_workers.discard(worker)
+        if not self._tracked_workers:
+            self._worker_reaper_timer.stop()
+
+    def quit_app(self, unmount: bool = True) -> bool:
+        """Request shutdown while keeping the event loop alive for safe draining."""
+        if self._shutdown_requested:
+            return True
+        if not self._guard_leave_form():
+            return False
+        self._shutdown_requested = True
+        self._shutdown_unmount = unmount
+        self._shutdown_unmount_started = False
+        self._shutdown_unmount_done = not unmount
+        self._poll_timer.stop()
+        self._lost_mounts.clear()
+        self.centralWidget().setEnabled(False)
+        self._set_status(tr("shutdown.waiting"))
+        # Wake queued TOFU requests so a closing app does not wait on a dialog.
+        for state in list(self._pending_tofu_requests):
+            state["accepted"] = False
+            state["event"].set()
+        for worker in list(self._tracked_workers):
+            if worker.isRunning():
+                worker.requestInterruption()
+        info_panel = getattr(self, "_current_info_panel", None)
+        if info_panel is not None and not sip.isdeleted(info_panel):
+            worker = info_panel.stop_background_work()
+            if worker is not None and worker not in self._tracked_workers:
+                self._track_background_worker(worker, delete_when_done=False)
+        self._shutdown_timer.start()
+        for browser in list(self._sftp_browsers.values()):
+            if not sip.isdeleted(browser):
+                browser.request_shutdown()
+        self._advance_shutdown()
+        return True
+
+    @pyqtSlot()
+    def _advance_shutdown(self) -> None:
+        if not self._shutdown_requested:
+            return
+        self._reap_finished_workers()
+        for browser in list(self._sftp_browsers.values()):
+            if not sip.isdeleted(browser) and not browser.is_shutdown_complete():
+                return
+        if self._tracked_workers or self._workers or self._terminal_connect_workers:
+            return
+        if self._shutdown_unmount and not self._shutdown_unmount_started:
+            self._shutdown_unmount_started = True
+            self._shutdown_disconnect_all()
+            return
+        if not self._shutdown_unmount_done:
+            return
+        if self._bridge_server is not None:
+            try:
+                if not self._bridge_server.stop(wait=False):
+                    return
+            except Exception as error:
+                self._cancel_shutdown(str(error))
+                return
+        self._stop_ipc()
+        self._shutdown_timer.stop()
+        self._worker_reaper_timer.stop()
+        self._explicit_quit = True
+        if self._logout_on_shutdown:
+            Session.logout()
+        self._tray.hide()
         QApplication.quit()
+
+    @pyqtSlot(str)
+    def _cancel_shutdown(self, reason: str) -> None:
+        if not self._shutdown_requested:
+            return
+        self._shutdown_requested = False
+        self._logout_on_shutdown = False
+        self._shutdown_timer.stop()
+        self.centralWidget().setEnabled(True)
+        self._poll_timer.start()
+        info_panel = getattr(self, "_current_info_panel", None)
+        if info_panel is not None and not sip.isdeleted(info_panel):
+            info_panel.resume_background_work()
+        for browser in list(self._sftp_browsers.values()):
+            if not sip.isdeleted(browser):
+                browser.cancel_shutdown()
+        self._set_status(reason)
+        self.shutdown_cancelled.emit(reason)
+
+    @pyqtSlot(list)
+    def _on_shutdown_unmounted(self, failures: list) -> None:
+        self._shutdown_unmount_done = True
+        if failures:
+            reason = "\n".join(f"{drive}: {message}" for _, drive, message in failures)
+            self._cancel_shutdown(reason)
+            self._err_popup(tr("unmount.failed.title"), reason)
 
     def closeEvent(self, event):
         if self._explicit_quit:
             event.accept()
             return
-
+        event.ignore()
+        if self._shutdown_requested:
+            return
         settings = self._mgr.get_settings()
         if settings.minimize_to_tray:
-            event.ignore()
             self.hide()
             self._tray.showMessage(
-                display_name(), tr("tray.running"),
+                tr("app.title"), tr("tray.running"),
                 self._tray.MessageIcon.Information, 2000,
             )
         else:
-            event.accept()
             self.quit_app()
 
     # ------------------------------------------------------------------
@@ -5383,6 +5750,8 @@ class MainWindow(FramelessMainWindow):
             logger.warning(f"Konnte Mount-Status nicht speichern: {e}")
 
     def _auto_reconnect_mounts(self):
+        if self._shutdown_requested:
+            return
         if not self._mgr.get_settings().auto_reconnect_mounts:
             return
         active_ids = self._mgr.get_active_mounts()
@@ -5487,35 +5856,36 @@ class MainWindow(FramelessMainWindow):
             if idx >= 0:
                 self._groups_combo.setCurrentIndex(idx)
         self._groups_combo.blockSignals(False)
+        self._sync_group_filter_menu()
+
+    def _sync_group_filter_menu(self, *_):
+        """Rebuild the square filter menu from the hidden combo's stable model."""
+        if not hasattr(self, "_group_filter_menu"):
+            return
+        self._group_filter_menu.clear()
+        selected = self._groups_combo.currentIndex()
+        for index in range(self._groups_combo.count()):
+            prefix = "✓  " if index == selected else "     "
+            action = self._group_filter_menu.addAction(prefix + self._groups_combo.itemText(index))
+            action.triggered.connect(
+                lambda checked=False, item_index=index: self._groups_combo.setCurrentIndex(item_index)
+            )
+        current_text = self._groups_combo.currentText() or tr("main.groups_all")
+        self._group_filter_btn.setToolTip(f"{tr('main.groups_filter')}: {current_text}")
+        color = self._theme_colors()["muted"] if selected <= 0 else self._theme_colors()["accent"]
+        self._group_filter_btn.setIcon(svg_icon("filter", color, 16))
 
     def _shutdown_disconnect_all(self):
-        """Schnelles Trennen beim Beenden: sshfs-Prozesse killen (sofort).
-        Nur wenn das fehlschlägt, normalen Unmount als Fallback versuchen."""
-        import subprocess
-        any_killed = False
-        for proc_name in ["sshfs.exe", "sshfs-win.exe", "sshfs-win-broker.exe"]:
-            try:
-                result = subprocess.run(
-                    ["taskkill", "/F", "/IM", proc_name],
-                    capture_output=True, creationflags=0x08000000, timeout=5,
-                )
-                if result.returncode == 0:
-                    any_killed = True
-            except Exception:
-                pass
-
-        if any_killed:
-            # Prozesse erfolgreich beendet – direkt fertig, kein weiteres Warten.
-            return
-
-        # Fallback: normaler Unmount, aber nur eigene Laufwerke (keine System-Drives).
+        """Schedule only this account's recorded mounts, never global taskkill."""
+        mounts = []
         for conn_id in list(self._active_mounts):
             conn = self._mgr.get_by_id(conn_id)
-            if conn and conn.drive_letter:
-                try:
-                    self._controller.unmount(conn.drive_letter)
-                except Exception as e:
-                    logger.warning(f"Unmount {conn.drive_letter} fehlgeschlagen: {e}")
+            if conn and not conn.is_ftp and conn.drive_letter:
+                mounts.append((conn_id, conn.drive_letter))
+        worker = ShutdownUnmountWorker(mounts, self._controller)
+        worker.result_ready.connect(self._on_shutdown_unmounted)
+        self._track_background_worker(worker)
+        worker.start()
 
     def _debug_widget_under_mouse(self):
         """Debug the widget currently under the mouse cursor (triggered by F2)."""
@@ -5577,6 +5947,8 @@ class MainWindow(FramelessMainWindow):
     # ------------------------------------------------------------------
 
     def _start_terminal_bridge(self):
+        if self._shutdown_requested:
+            return
         try:
             from src.terminal.bridge_server import TerminalBridgeServer
             self._bridge_server = TerminalBridgeServer()
@@ -5595,39 +5967,52 @@ class MainWindow(FramelessMainWindow):
             self._bridge_server = None
 
     def _terminal_tofu_callback(self, host: str, port: int, fingerprint: str) -> bool:
-        """Called from bridge_server thread when an unknown host key is encountered."""
+        """Ask on the GUI thread when an SSH worker encounters a new host key."""
         import threading
-        result = threading.Event()
-        accepted = [False]
+        if self._shutdown_requested:
+            return False
+        if QThread.currentThread() == self.thread():
+            return self._show_terminal_tofu_dialog(host, port, fingerprint)
 
-        def _ask():
-            from PyQt6.QtWidgets import QMessageBox
-            body = tr("terminal.host_key_dialog.body").format(host=host, fingerprint=fingerprint)
-            dlg = QMessageBox(self)
-            dlg.setWindowTitle(tr("terminal.host_key_dialog.title"))
-            dlg.setText(body)
-            dlg.setStandardButtons(
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
-            dlg.setDefaultButton(QMessageBox.StandardButton.No)
-            accepted[0] = dlg.exec() == QMessageBox.StandardButton.Yes
-            result.set()
+        state = {"event": threading.Event(), "accepted": False, "cancelled": False}
+        self._pending_tofu_requests.append(state)
+        try:
+            self._terminal_tofu_requested.emit(host, port, fingerprint, state)
+            if not state["event"].wait(timeout=30):
+                state["cancelled"] = True
+                return False
+            return state["accepted"]
+        finally:
+            if state in self._pending_tofu_requests:
+                self._pending_tofu_requests.remove(state)
 
-        QTimer.singleShot(0, _ask)
-        result.wait(timeout=30)
-        return accepted[0]
+    def _show_terminal_tofu_dialog(self, host: str, port: int, fingerprint: str) -> bool:
+        return StyledMessageBox.question(
+            self, tr("terminal.host_key_dialog.title"),
+            tr("terminal.host_key_dialog.body", host=host, fingerprint=fingerprint),
+            yes_text=tr("dialog.yes"), no_text=tr("dialog.no"),
+        )
+
+    @pyqtSlot(str, int, str, object)
+    def _dispatch_terminal_tofu_dialog(self, host: str, port: int, fingerprint: str, state) -> None:
+        try:
+            if not self._shutdown_requested and not state.get("cancelled", False):
+                state["accepted"] = self._show_terminal_tofu_dialog(host, port, fingerprint)
+        finally:
+            state["event"].set()
 
     def _open_terminal_panel(self, conn_id: str):
         """Switch the right panel to _PANEL_TERMINAL for conn_id, opening the first session."""
-        if self._panel_mode in (_PANEL_EDIT, _PANEL_ADD):
-            if not self._guard_leave_form():
-                return
-
+        if not self._guard_leave_form():
+            return
         conn = self._mgr.get_by_id(conn_id)
         if not conn:
             return
         if self._reject_ftp_action(conn, "ftp.ssh_unsupported"):
             return
+        self._main_stack.setCurrentIndex(0)
+        self._clear_fs_content()
+        self._set_sidebar_active("home")
 
         # If already showing terminal for same conn → just bring to front
         if self._panel_mode == _PANEL_TERMINAL and self._panel_conn_id == conn_id:
@@ -5663,7 +6048,10 @@ class MainWindow(FramelessMainWindow):
             if active_key:
                 self._switch_terminal_tab(conn_id, active_key)
         else:
-            # First session for this conn
+            # Never display another host's old terminal under this host's header.
+            self._terminal_placeholder.setText(tr("terminal.connecting"))
+            self._terminal_stack.setCurrentWidget(self._terminal_placeholder)
+            self._rebuild_tab_bar(conn_id)
             self._create_terminal_session(conn_id)
 
         self._right_panel_widget.setVisible(True)
@@ -5701,13 +6089,16 @@ class MainWindow(FramelessMainWindow):
         return True
 
     def _start_terminal_connect(self, session_key: str, conn_auth) -> None:
+        if self._shutdown_requested:
+            return
         conn_id = session_key.rsplit("#", 1)[0]
         self._terminal_connecting.add(conn_id)
         self._set_status(tr("terminal.connecting"))
         self._terminal_pending_conn[session_key] = conn_auth
         worker = TerminalConnectWorker(self._bridge_server, session_key, conn_auth)
-        worker.finished.connect(self._on_terminal_connected)
+        worker.result_ready.connect(self._on_terminal_connected)
         self._terminal_connect_workers[session_key] = worker
+        self._track_background_worker(worker)
         worker.start()
 
     def _on_terminal_connected(self, session_key: str, token: object):
@@ -5715,16 +6106,26 @@ class MainWindow(FramelessMainWindow):
         conn_id = session_key.rsplit("#", 1)[0]
         self._terminal_connecting.discard(conn_id)
 
-        worker = self._terminal_connect_workers.pop(session_key, None)
-        if worker:
-            worker.deleteLater()
+        self._terminal_connect_workers.pop(session_key, None)
         conn_auth = self._terminal_pending_conn.pop(session_key, None)
 
-        if token is None:
-            self._err_popup(tr("terminal.connecting"), tr("terminal.error_connect"))
+        # A connection may have been deleted while the SSH handshake was in
+        # flight. Do not resurrect its terminal tab; close the just-created SSH
+        # session instead.
+        if self._shutdown_requested or self._mgr.get_by_id(conn_id) is None:
+            if token is not None and self._bridge_server is not None:
+                self._bridge_server.close_session(session_key)
             return
 
-        theme = self._mgr.get_settings().theme or "dark"
+        if token is None:
+            if self._panel_mode == _PANEL_TERMINAL and self._panel_conn_id == conn_id:
+                self._terminal_placeholder.setText(tr("terminal.error_connect"))
+                self._err_popup(tr("terminal.connecting"), tr("terminal.error_connect"))
+            else:
+                logger.warning("Background terminal connection failed for %s", conn_id)
+            return
+
+        theme = self._current_theme()
         from src.terminal.terminal_panel import TerminalPanel
         panel = TerminalPanel(self._bridge_server, session_key, conn_auth, theme, self)
         panel.reconnect_requested.connect(lambda sk: self._on_terminal_reconnect(sk))
@@ -5736,8 +6137,10 @@ class MainWindow(FramelessMainWindow):
         tabs.append(session_key)
         self._terminal_active_tab[conn_id] = session_key
 
-        self._rebuild_tab_bar(conn_id)
-        self._switch_terminal_tab(conn_id, session_key)
+        # A late result for A must never replace a currently visible B terminal.
+        if self._panel_mode == _PANEL_TERMINAL and self._panel_conn_id == conn_id:
+            self._rebuild_tab_bar(conn_id)
+            self._switch_terminal_tab(conn_id, session_key)
         self._update_card_terminal_indicator(conn_id)
 
     def _rebuild_tab_bar(self, conn_id: str):
@@ -5767,7 +6170,9 @@ class MainWindow(FramelessMainWindow):
         self._terminal_tab_bar.setVisible(len(tabs) > 1)
 
     def _switch_terminal_tab(self, conn_id: str, session_key: str):
-        """Activate the tab for session_key."""
+        """Activate only a tab belonging to the currently visible connection."""
+        if self._panel_mode != _PANEL_TERMINAL or self._panel_conn_id != conn_id:
+            return
         self._terminal_active_tab[conn_id] = session_key
         panel = self._terminal_panels.get(session_key)
         if panel:
@@ -5793,6 +6198,8 @@ class MainWindow(FramelessMainWindow):
         panel = self._terminal_panels.pop(session_key, None)
         if panel is not None:
             panel.close_session()
+            if self._terminal_stack.currentWidget() is panel:
+                self._terminal_stack.setCurrentWidget(self._terminal_placeholder)
             self._terminal_stack.removeWidget(panel)
             panel.setParent(None)
             panel.deleteLater()

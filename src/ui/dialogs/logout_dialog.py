@@ -47,14 +47,14 @@ class LogoutConfirmDialog(FramelessDialog):
         content_row = QHBoxLayout()
         content_row.setSpacing(16)
 
-        icon_lbl = QLabel("🚪")
-        icon_lbl.setStyleSheet(
-            "font-size: 36px; background: transparent; margin-right: 6px;"
-        )
-        icon_lbl.setAlignment(
-            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter
-        )
-        content_row.addWidget(icon_lbl)
+        from src.theme_manager import get_theme_manager
+        from src.ui.icons import pixmap as svg_pixmap
+        icon_lbl = QLabel()
+        icon_lbl.setObjectName("messageIcon")
+        icon_lbl.setFixedSize(44, 44)
+        icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_lbl.setPixmap(svg_pixmap("logout", get_theme_manager().get_colors()["accent"], 22))
+        content_row.addWidget(icon_lbl, 0, Qt.AlignmentFlag.AlignTop)
 
         text_col = QVBoxLayout()
         text_col.setSpacing(6)

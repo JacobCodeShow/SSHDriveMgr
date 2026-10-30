@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
     QScrollArea, QWidget, QProgressBar, QCheckBox
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot
 from src.ui.dialog_utils import match_parent_height
 from src.ui.frameless_dialog import FramelessDialog
 from src.ui.widgets.no_wheel import NoWheelScrollArea
@@ -35,8 +35,10 @@ class UpdateDialog(FramelessDialog):
         self.changelog = changelog
         self.download_url = download_url
         self.obj_type = obj_type
-        self._downloaded = already_downloaded
+        self._downloaded = already_downloaded and obj_type in ("installer", "portable_exe")
         self._armed = armed
+        self._handover_busy = False
+        self._handover_result_callback = None
 
         self.setObjectName("dialogSurface")
         self.setWindowTitle(tr("update.window_title"))
@@ -62,7 +64,10 @@ class UpdateDialog(FramelessDialog):
         title.setObjectName("dialogTitle")
         hero_l.addWidget(title)
 
-        self.lead = QLabel(tr("update.ready_lead") if self._downloaded else tr("update.lead"))
+        lead_key = ("update.onedir.lead" if self.obj_type == "onedir_zip" else
+                    "update.browser.lead" if self.obj_type == "browser" else
+                    "update.ready_lead" if self._downloaded else "update.lead")
+        self.lead = QLabel(tr(lead_key))
         self.lead.setObjectName("dialogLead")
         self.lead.setWordWrap(True)
         hero_l.addWidget(self.lead)
@@ -128,7 +133,8 @@ class UpdateDialog(FramelessDialog):
         cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         cancel_btn.clicked.connect(self.reject)
 
-        self.browser_btn = QPushButton(tr("update.btn.browser"))
+        self.browser_btn = QPushButton(tr("update.btn.onedir") if self.obj_type == "onedir_zip"
+                                       else tr("update.btn.browser"))
         self.browser_btn.setObjectName("secondaryBtn")
         self.browser_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.browser_btn.clicked.connect(self._open_browser)
@@ -145,8 +151,10 @@ class UpdateDialog(FramelessDialog):
         if self.download_url:
             btn_bar_layout.addWidget(self.browser_btn)
 
-        if self.obj_type != "browser":
+        if self.obj_type in ("installer", "portable_exe"):
             btn_bar_layout.addWidget(self.install_btn)
+        else:
+            self.install_btn.hide()
 
         outer.addWidget(btn_bar)
 
@@ -176,8 +184,26 @@ class UpdateDialog(FramelessDialog):
     def _restart_and_install(self):
         self.install_btn.setEnabled(False)
         self.install_btn.setText(tr("update.btn.installing"))
+        # Only the handover callback may close the dialog after verified success.
         self.install_now.emit()
-        self.accept()
+
+    def reject(self):
+        # Do not let a dialog disappear while its worker can still hand over.
+        if not self._handover_busy:
+            super().reject()
+
+    def closeEvent(self, event):
+        if self._handover_busy:
+            event.ignore()
+        else:
+            super().closeEvent(event)
+
+    @pyqtSlot(bool, str)
+    def on_handover_finished(self, success: bool, message: str):
+        # QObject-bound slot: AutoConnection queues worker signals to the GUI
+        # thread before the callback touches widgets or requests shutdown.
+        if self._handover_result_callback is not None:
+            self._handover_result_callback(success, message)
 
     def update_progress(self, percent: int):
         self.progress_bar.setValue(percent)
@@ -204,14 +230,26 @@ def _wire(dlg: "UpdateDialog", updater, download_url: str = ""):
     """Connect a dialog to the updater: download, arming, restart-into-installer."""
     from PyQt6.QtCore import QTimer
     from PyQt6.QtWidgets import QApplication
-    from src.updater import launch_pending_installer, set_install_on_next_start
+    from src.updater import launch_pending_installer, set_install_on_next_start, get_update_handover_error
+    from src.ui.dialogs.styled_message_box import StyledMessageBox
 
     if download_url:
         dlg.start_background_download.connect(lambda: updater.download_update_async(download_url))
         updater.download_progress.connect(dlg.update_progress)
         updater.download_finished.connect(dlg.on_download_finished)
 
-    dlg.schedule_changed.connect(set_install_on_next_start)
+    def _schedule_changed(enabled):
+        if set_install_on_next_start(enabled):
+            return
+        # A failed persistence operation must not leave the checkbox claiming
+        # a schedule that was never saved.
+        dlg._armed = not enabled
+        dlg.schedule_cb.blockSignals(True)
+        dlg.schedule_cb.setChecked(not enabled)
+        dlg.schedule_cb.blockSignals(False)
+        StyledMessageBox.warning(dlg, tr("dialog.error"), get_update_handover_error())
+
+    dlg.schedule_changed.connect(_schedule_changed)
 
     def _shutdown():
         # Prefer the app's own shutdown (stops the IPC bridge); mounts stay up,
@@ -222,11 +260,58 @@ def _wire(dlg: "UpdateDialog", updater, download_url: str = ""):
                 return
         QApplication.instance().quit()
 
-    def _install_now():
-        record = updater.pending_update()
-        if record and launch_pending_installer(record, from_version=updater.current_version):
+    def _finished(success: bool, message: str):
+        dlg._handover_busy = False
+        dlg.schedule_cb.setEnabled(True)
+        dlg.browser_btn.setEnabled(True)
+        if success:
             # The helper waits for this process to exit before starting Setup.
+            dlg.accept()
             QTimer.singleShot(200, _shutdown)
+        else:
+            # A late launch failure may follow a successful disarm. Reflect
+            # persisted state rather than leaving an inaccurately armed UI.
+            pending = updater.pending_update()
+            if isinstance(pending, dict) and isinstance(pending.get("install_on_next_start"), bool):
+                dlg._armed = pending["install_on_next_start"]
+                dlg.schedule_cb.blockSignals(True)
+                dlg.schedule_cb.setChecked(dlg._armed)
+                dlg.schedule_cb.blockSignals(False)
+            dlg.install_btn.setEnabled(True)
+            dlg.install_btn.setText(tr("update.btn.install_now"))
+            StyledMessageBox.warning(
+                dlg, tr("dialog.error"),
+                message or "No verified update is available. Download it again.",
+            )
+
+    # An explicit boolean capability, not hasattr(), keeps mocks/older adapters
+    # from accidentally claiming this additive API. Production always uses it.
+    asynchronous = getattr(updater, "supports_async_handover", False) is True
+    if asynchronous:
+        dlg._handover_result_callback = _finished
+        updater.handover_finished.connect(dlg.on_handover_finished)
+
+        def _disconnect_handover(_result):
+            # Parent-owned dialogs can outlive exec(); a closed dialog must
+            # never react to the next dialog's handover result.
+            try:
+                updater.handover_finished.disconnect(dlg.on_handover_finished)
+            except (TypeError, RuntimeError):
+                pass
+            dlg._handover_result_callback = None
+
+        dlg.finished.connect(_disconnect_handover)
+
+    def _install_now():
+        dlg._handover_busy = True
+        dlg.schedule_cb.setEnabled(False)
+        dlg.browser_btn.setEnabled(False)
+        if asynchronous:
+            updater.launch_pending_update_async()
+            return
+        record = updater.pending_update()
+        success = bool(record) and launch_pending_installer(record, from_version=updater.current_version)
+        _finished(success, get_update_handover_error() if record and not success else "")
 
     dlg.install_now.connect(_install_now)
 
@@ -235,7 +320,12 @@ def run_update_dialog(parent, updater, version: str, changelog: str,
                       download_url: str, obj_type: str):
     """Modal update dialog for a version reported by the GitHub check."""
     pending = updater.pending_update()
-    already = bool(pending) and str(pending.get("version", "")) == version
+    expected_name = (f"SSHDriveMgr-Setup-{version}.exe" if obj_type == "installer" else
+                     "SSHDriveMgr.exe" if obj_type == "portable_exe" else None)
+    already = (bool(pending) and expected_name is not None
+               and str(pending.get("version", "")) == version
+               and pending.get("asset_type") == obj_type
+               and pending.get("asset_name") == expected_name)
     armed = bool(pending.get("install_on_next_start")) if already else True
 
     dlg = UpdateDialog(parent, version, changelog, download_url, obj_type,

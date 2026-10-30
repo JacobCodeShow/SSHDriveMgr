@@ -11,6 +11,7 @@ sessions; the browser window decides which client to hand in.
 
 from __future__ import annotations
 
+import threading
 from typing import Callable, Optional, Union
 
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -78,6 +79,12 @@ class SftpDownloadWorker(QThread):
     progress = pyqtSignal(int, int)     # bytes_done, bytes_total
     finished = pyqtSignal(str)          # local_path on success
     error = pyqtSignal(str)             # error_message
+    cancelled = pyqtSignal()
+
+    def cancel(self) -> None:
+        """Request cancellation at the next transfer progress callback."""
+        self._cancel_requested.set()
+        self.requestInterruption()
 
     def __init__(
         self, client: TransferClient, remote_path: str, local_path: str
@@ -86,20 +93,35 @@ class SftpDownloadWorker(QThread):
         self._client = client
         self._remote_path = remote_path
         self._local_path = local_path
+        self._cancelled_during_transfer = False
+        self._cancel_requested = threading.Event()
 
     def run(self) -> None:
+        # requestInterruption alone is ignored by Qt before a thread starts.
+        # Keep a non-blocking request flag for queued/pre-start cancellation.
+        if self._cancel_requested.is_set() or self.isInterruptionRequested():
+            self.cancelled.emit()
+            return
         try:
             self._client.download(
                 self._remote_path, self._local_path,
                 progress_callback=self._on_progress,
             )
+            # The client commits the destination only after a successful transfer.
+            # A late interruption request must not relabel a committed file as canceled.
             self.finished.emit(self._local_path)
-        except TransferError as e:
-            self.error.emit(str(e))
         except Exception as e:
-            self.error.emit(f"Unexpected error: {e}")
+            if self._cancelled_during_transfer:
+                self.cancelled.emit()
+            elif isinstance(e, TransferError):
+                self.error.emit(str(e))
+            else:
+                self.error.emit(f"Unexpected error: {e}")
 
     def _on_progress(self, done: int, total: int) -> None:
+        if self._cancel_requested.is_set() or self.isInterruptionRequested():
+            self._cancelled_during_transfer = True
+            raise InterruptedError("Download cancelled by user")
         self.progress.emit(done, total)
 
 

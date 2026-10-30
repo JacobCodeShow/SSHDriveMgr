@@ -197,9 +197,12 @@
     };
   }
 
+  // Terminal input is ALWAYS binary, even pasted JSON. Text frames are
+  // reserved for explicit protocol controls; resize uses QWebChannel above.
+  const inputEncoder = new TextEncoder();
   term.onData(function(data) {
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(data);
+      ws.send(inputEncoder.encode(data));
     }
   });
 

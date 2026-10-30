@@ -7,9 +7,13 @@ even when the right panel switches to another mode (session persistence).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
+import weakref
+
+from src.theme_manager import get_theme_manager
 
 from PyQt6.QtCore import QSize, QUrl, pyqtSignal
 from PyQt6.QtWebChannel import QWebChannel
@@ -77,14 +81,38 @@ class TerminalPanel(QWidget):
                 original_resize(cols, rows)
 
         self._bridge.resize = _intercept_resize  # type: ignore[method-assign]
+        self._page.loadFinished.connect(self._on_page_loaded)
+        manager = get_theme_manager()
+        manager.subscribe(self.set_theme)
+        widget_ref = weakref.ref(self)
+
+        def unsubscribe_on_destroy(*_):
+            widget = widget_ref()
+            if widget is not None:
+                manager.unsubscribe(widget.set_theme)
+
+        self.destroyed.connect(unsubscribe_on_destroy)
+
+    def set_theme(self, theme: str) -> None:
+        """Recolour the existing terminal/overlay; never reload or reconnect."""
+        self._theme = theme
+        colors = get_theme_manager().get_colors(theme)
+        self._page.runJavaScript(
+            "if (window.setTerminalTheme) window.setTerminalTheme("
+            + json.dumps(colors) + ");"
+        )
+
+    def _on_page_loaded(self, ok: bool) -> None:
+        # A theme notification may arrive while setHtml is still loading.
+        if ok:
+            self.set_theme(self._theme)
 
     def load_session(self, token: str):
         """Load the xterm.js page for the given session token."""
         port = self._bridge_server.port
         ws_url = f"ws://127.0.0.1:{port}/ws/{token}"
 
-        from src.ui.theme import THEME_COLORS
-        colors = THEME_COLORS.get(self._theme, THEME_COLORS["dark"])
+        colors = get_theme_manager().get_colors(self._theme)
         bg = colors["background"]
         fg = colors["text"]
         accent = colors["accent"]
@@ -125,4 +153,25 @@ def _build_html(ws_url: str, bg: str, fg: str, accent: str, surface: str = "") -
         .replace("{{MSG_DISCONNECTED}}", tr("terminal.disconnected"))
         .replace("{{MSG_RECONNECT}}", tr("terminal.reconnect"))
     )
-    return html
+    # The template deliberately keeps `term` inside its IIFE. Install the
+    # update hook in that lexical scope, rather than exposing/recreating it.
+    hook = """
+  window.setTerminalTheme = function(colors) {
+    term.options.theme = Object.assign({}, term.options.theme, {
+      background: colors.background,
+      foreground: colors.text,
+      cursor: colors.accent,
+      cursorAccent: colors.background,
+      selectionBackground: colors.accent + '55'
+    });
+    document.documentElement.style.backgroundColor = colors.background;
+    document.body.style.backgroundColor = colors.background;
+    overlay.style.backgroundColor = colors.surface;
+    overlay.style.color = colors.text;
+    reconnectBtn.style.backgroundColor = colors.accent;
+    document.querySelectorAll('.overlay-dot').forEach(function(dot) {
+      dot.style.backgroundColor = colors.accent;
+    });
+  };
+"""
+    return html.replace("  connect();\n})();", hook + "\n  connect();\n})();")
