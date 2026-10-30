@@ -265,8 +265,8 @@ def test_powershell_scripts_and_every_workflow_run_parse_without_execution():
     if not powershell:
         pytest.skip("PowerShell parser unavailable on this platform")
     scripts = [(WORKSPACE / name).read_text(encoding="utf-8") for name in (
-        "build_dual.ps1", "installer/build_installer.ps1")]
-    for name in ("manual-build.yml", "auto-release.yml"):
+        "build_dual.ps1", "installer/build_installer.ps1", "scripts/artifact_version.ps1")]
+    for name in ("manual-build.yml", "auto-release.yml", "validate-build.yml"):
         scripts.extend(workflow_runs(WORKSPACE / ".github/workflows" / name))
     # ParseInput builds an AST only. No script, native build, installer, release
     # command or registry operation is executed by this test.
@@ -306,7 +306,8 @@ def test_manual_checkout_and_both_workflow_native_commands_are_checked():
         text = path.read_text(encoding="utf-8")
         assert '$env:RELEASE_TAG -cne "v$version"' in text
         assert "CArchiveReader" in text and "archive.extract" in text
-        assert "VersionInfo.ProductVersion" in text
+        assert r'. .\scripts\artifact_version.ps1' in text
+        assert 'Assert-ArtifactVersion -VersionInfo $artifact.VersionInfo' in text
         assert 'SSHDriveMgr-Setup-$version.exe' in text
         assert r'run: .\build_dual.ps1 all -SkipStartupCheck' in text
         assert r'run: .\installer\build_installer.ps1 -SkipBuild' in text
@@ -345,6 +346,18 @@ def test_manual_tag_contract_is_checked_without_executing_old_builds(tmp_path, p
         assert result.returncode != 0
         assert "tag predates explicit-mode build interface" in result.stderr
     assert "must not execute" not in result.stdout + result.stderr
+
+
+def test_validation_workflow_never_publishes_or_moves_tags():
+    text = (WORKSPACE / ".github/workflows/validate-build.yml").read_text(encoding="utf-8")
+    assert "workflow_dispatch:" in text and "contents: read" in text
+    assert "contents: write" not in text
+    assert "gh release" not in text and "git push" not in text and "git tag" not in text
+    assert text.index('- name: Install Inno Setup') < text.index('- name: Run tests')
+    assert text.index('- name: Run tests') < text.index('- name: Build executables')
+    assert r'run: .\build_dual.ps1 all -SkipStartupCheck' in text
+    assert r'run: .\installer\build_installer.ps1 -SkipBuild' in text
+    assert "Assert-ArtifactVersion -VersionInfo $artifact.VersionInfo" in text
 
 
 def test_auto_release_stays_draft_until_all_assets_and_checksums_are_verified():

@@ -106,9 +106,11 @@ jobs:
           if ($env:RELEASE_TAG -cne "v$version") { throw 'Release tag/version changed during build' }
           $installer = "dist_installer/SSHDriveMgr-Setup-$version.exe"
           $executables = @('dist/SSHDriveMgr.exe', 'dist/SSHDriveMgr-cli.exe', 'dist/SSHDriveMgr-onedir/SSHDriveMgr.exe', $installer)
+          . .\scripts\artifact_version.ps1
           foreach ($file in $executables) {
             $artifact = Get-Item -LiteralPath $file -ErrorAction Stop
-            if ($artifact.Length -le 0 -or $artifact.VersionInfo.ProductVersion -ne $version) { throw "Embedded version mismatch: $file" }
+            if ($artifact.Length -le 0) { throw "Empty release artifact: $file" }
+            Assert-ArtifactVersion -VersionInfo $artifact.VersionInfo -Version $version -Artifact $file
           }
           @'
           from pathlib import Path

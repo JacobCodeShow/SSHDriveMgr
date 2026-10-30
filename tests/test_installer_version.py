@@ -33,10 +33,8 @@ def test_inno_sets_numeric_and_text_versions_from_one_source():
     assert 'src\\version.txt' in source
     # These are resource strings vs numeric tuples, not a reason to weaken gates.
     script = (ROOT / "installer/build_installer.ps1").read_text(encoding="utf-8")
-    assert "$productVersion -cne $version" in script
-    assert "$fileVersion -cne $version" in script
-    assert "ProductVersion='$productVersion'" in script
-    assert "FileVersion='$fileVersion'" in script
+    assert "scripts/artifact_version.ps1" in script
+    assert "Assert-ArtifactVersion -VersionInfo $artifact.VersionInfo" in script
 
 
 def find_iscc():
@@ -90,7 +88,9 @@ def test_native_installer_pe_text_and_fixed_versions_agree(tmp_path, release_ver
                             encoding="utf-8", errors="replace", timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     actual = json.loads(result.stdout)
-    assert actual["ProductVersion"] == release_version
-    assert actual["FileVersion"] == release_version
+    # Inno reserves trailing space/NUL padding in VERSIONINFO strings. Only
+    # that padding is insignificant; digits and every fixed numeric field matter.
+    assert actual["ProductVersion"].rstrip(" \x00") == release_version
+    assert actual["FileVersion"].rstrip(" \x00") == release_version
     expected_parts = [int(value) for value in release_version.split(".")] + [0]
     assert actual["ProductParts"] == actual["FileParts"] == expected_parts

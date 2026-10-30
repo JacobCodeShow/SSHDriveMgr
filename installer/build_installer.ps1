@@ -46,12 +46,8 @@ try {
     if ($artifact.Length -le 0 -or $artifact.LastWriteTimeUtc -lt $started.AddSeconds(-2)) {
         throw "Empty or stale installer output: $setup"
     }
-    $productVersion = $artifact.VersionInfo.ProductVersion
-    $fileVersion = $artifact.VersionInfo.FileVersion
-    Write-Host ("[version] Installer expected='{0}', ProductVersion='{1}', FileVersion='{2}'" -f $version, $productVersion, $fileVersion)
-    if ($productVersion -cne $version -or $fileVersion -cne $version) {
-        throw "Installer embedded version mismatch: expected '$version', ProductVersion='$productVersion', FileVersion='$fileVersion', artifact='$setup'."
-    }
+    . (Join-Path $repoRoot 'scripts/artifact_version.ps1')
+    Assert-ArtifactVersion -VersionInfo $artifact.VersionInfo -Version $version -Artifact $setup
     Write-Host "Done! $setup" -ForegroundColor Green
 } finally {
     Pop-Location

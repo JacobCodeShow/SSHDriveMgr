@@ -1,0 +1,71 @@
+name: Validate Build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout requested revision
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements.txt pyinstaller pytest
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup -y
+          if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed' }
+
+      - name: Run tests
+        shell: pwsh
+        run: |
+          python -m pytest tests -q
+          if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
+
+      - name: Build executables
+        shell: pwsh
+        run: .\build_dual.ps1 all -SkipStartupCheck
+
+      - name: Build installer
+        shell: pwsh
+        run: .\installer\build_installer.ps1 -SkipBuild
+
+      - name: Validate artifact versions
+        shell: pwsh
+        run: |
+          $version = (Get-Content src/version.txt -Raw -Encoding UTF8).Trim()
+          . .\scripts\artifact_version.ps1
+          $files = @('dist/SSHDriveMgr.exe', 'dist/SSHDriveMgr-cli.exe', 'dist/SSHDriveMgr-onedir/SSHDriveMgr.exe', "dist_installer/SSHDriveMgr-Setup-$version.exe")
+          foreach ($file in $files) {
+            $artifact = Get-Item -LiteralPath $file -ErrorAction Stop
+            if ($artifact.Length -le 0) { throw "Empty validation artifact: $file" }
+            Assert-ArtifactVersion -VersionInfo $artifact.VersionInfo -Version $version -Artifact $file
+          }
+
+      # Workflow artifacts only: this workflow has no Release/tag publishing step.
+      - name: Upload validation installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-validation-${{ github.sha }}
+          path: dist_installer/SSHDriveMgr-Setup-*.exe
+          if-no-files-found: error
+          retention-days: 3
