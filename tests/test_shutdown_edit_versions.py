@@ -20,6 +20,47 @@ def spin(app, predicate, timeout=5):
     assert predicate(), "Qt shutdown condition timed out"
 
 
+def atomic_save(app, source, target, timeout=2):
+    """Simulate an editor retrying a transient Windows share/delete lock.
+
+    This fixture tests delivery of a late atomic save, not a contention-free
+    MoveFileEx call. Never ignore a failed save or change file permissions.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError as error:
+            if getattr(error, "winerror", None) not in (5, 32, 33) or time.monotonic() >= deadline:
+                raise
+            app.processEvents()
+            time.sleep(0.02)
+
+
+def test_atomic_save_retries_only_transient_windows_locks(monkeypatch):
+    temporary_lock = PermissionError("temporary share lock")
+    temporary_lock.winerror = 32
+    replace = mock.Mock(side_effect=[temporary_lock, None])
+    monkeypatch.setattr(os, "replace", replace)
+    app = SimpleNamespace(processEvents=mock.Mock())
+    atomic_save(app, "new", "old")
+    assert replace.call_count == 2
+    app.processEvents.assert_called_once()
+
+
+def test_atomic_save_does_not_hide_permanent_or_expired_errors(monkeypatch):
+    for winerror, timeout in ((None, 2), (5, 0), (32, 0), (33, 0)):
+        error = PermissionError("must propagate")
+        if winerror is not None:
+            error.winerror = winerror
+        replace = mock.Mock(side_effect=error)
+        monkeypatch.setattr(os, "replace", replace)
+        with pytest.raises(PermissionError, match="must propagate"):
+            atomic_save(SimpleNamespace(processEvents=mock.Mock()), "new", "old", timeout=timeout)
+        replace.assert_called_once()
+
+
 @pytest.fixture(scope="module")
 def qt_app():
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -136,7 +177,7 @@ def test_save_a_while_slow_flush_b_is_not_lost(browser, qt_app, tmp_path, watch_
     if watch_event:
         replacement = tmp_path / "atomic-save.tmp"
         replacement.write_bytes(b"a-version-two")
-        os.replace(replacement, a)
+        atomic_save(qt_app, replacement, a)
     else:
         a.write_bytes(b"a-version-two")
     if watch_event:
