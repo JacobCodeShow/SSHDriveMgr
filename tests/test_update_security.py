@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import time
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -83,7 +84,8 @@ def updater_namespace(root, installed=True):
                  "threading": SimpleNamespace(Thread=ImmediateThread),
                  "QObject": object, "pyqtSignal": Signal,
                  "version": SimpleNamespace(parse=lambda value: tuple(map(int, value.split(".")))),
-                 "time": SimpleNamespace(time=lambda: 123456)}
+                 "time": SimpleNamespace(time=lambda: 123456, strftime=time.strftime,
+                                         localtime=time.localtime)}
     exec(compile(tree, "updater-security-test", "exec"), namespace)
     namespace["updates_dir"] = lambda: root
     if installed is not None:

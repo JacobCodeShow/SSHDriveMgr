@@ -102,7 +102,7 @@ def test_onedir_metadata_prevents_onefile_handover_and_asset_selection(tmp_path,
     assert "onedir" in namespace["get_update_handover_error"]()
     manager = namespace["UpdaterManager"]("1.0.0")
     release = {"tag_name": "v" + VERSION, "assets": [{"name": "SSHDriveMgr.exe", "browser_download_url": "not-selected"}]}
-    with mock.patch.object(security, "fetch_release", return_value=release):
+    with mock.patch.object(security, "fetch_latest_release", return_value=release):
         manager.check_for_updates_async()
     assert manager.update_available.emit.call_args.args[-1] == "browser"
     for extraction in (tmp_path / "elsewhere" / "_MEI12345", tmp_path / "_MEI12345"):

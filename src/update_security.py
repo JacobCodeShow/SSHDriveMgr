@@ -7,11 +7,17 @@ they never authorize a path, executable type, URL or checksum by themselves.
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
+import threading
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 REPOSITORY = "JacobCodeShow/SSHDriveMgr"
@@ -24,6 +30,94 @@ _SHA256 = re.compile(r"[0-9a-fA-F]{64}\Z")
 
 class UpdateSecurityError(ValueError):
     pass
+
+
+class UpdateRateLimitError(UpdateSecurityError):
+    """GitHub API throttling, including the shared in-process retry deadline."""
+
+    def __init__(self, retry_at, code=403):
+        self.retry_at = float(retry_at)
+        self.code = code
+        super().__init__(
+            f"GitHub API rate limit exceeded (HTTP {code}). "
+            "Please wait before checking for updates again; "
+            "official release downloads are not affected.")
+
+
+_api_rate_limit_lock = threading.Lock()
+_api_retry_at = 0.0
+_api_retry_code = 403
+_RATE_LIMIT_BODY_BYTES = 64 * 1024
+_RELEASE_BYTES = 4 * 1024 * 1024
+_DEFAULT_RETRY_SECONDS = 60.0
+_MAX_RETRY_SECONDS = 24 * 60 * 60.0
+_ETAG = re.compile(r'(?:W/)?"[\x21\x23-\x7e\x80-\xff]*"\Z')
+
+
+def _response_header(headers, name):
+    if headers is None:
+        return None
+    value = headers.get(name)
+    if value is None:
+        value = next((value for key, value in headers.items()
+                      if key.lower() == name.lower()), None)
+    return value if isinstance(value, str) else None
+
+
+def _safe_header_value(value):
+    return (isinstance(value, str) and 0 < len(value) <= 1024
+            and bool(value.strip())
+            and all(32 <= ord(char) <= 126 for char in value))
+
+
+def _retry_after_seconds(value, now):
+    if not isinstance(value, str) or len(value) > 1024:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            date = parsedate_to_datetime(value)
+            if date.tzinfo is None:
+                date = date.replace(tzinfo=timezone.utc)
+            seconds = date.timestamp() - now
+        except (ValueError, TypeError, OverflowError, OSError):
+            return None
+    return seconds if math.isfinite(seconds) and seconds > 0 else None
+
+
+def _rate_limit_deadline(headers, now):
+    seconds = _retry_after_seconds(_response_header(headers, "Retry-After"), now)
+    if seconds is None:
+        try:
+            reset = float(_response_header(headers, "X-RateLimit-Reset"))
+            seconds = reset - now if math.isfinite(reset) and reset > now else None
+        except (TypeError, ValueError, OverflowError):
+            seconds = None
+    if seconds is None:
+        seconds = _DEFAULT_RETRY_SECONDS
+    return now + min(seconds, _MAX_RETRY_SECONDS)
+
+
+def _is_rate_limit(error, now):
+    if error.code == 429:
+        return True
+    if error.code != 403:
+        return False
+    remaining = _response_header(error.headers, "X-RateLimit-Remaining")
+    if remaining is not None and remaining.strip() == "0":
+        return True
+    if _retry_after_seconds(_response_header(error.headers, "Retry-After"), now) is not None:
+        return True
+    # GitHub's secondary limit may have remaining quota and no Retry-After.
+    # Never download an unbounded error page or interpret every 403 as throttling.
+    try:
+        body = error.read(_RATE_LIMIT_BODY_BYTES).decode("utf-8", errors="replace").lower()
+    except (OSError, ValueError):
+        return False
+    return any(message in body for message in (
+        "api rate limit", "rate limit exceeded", "secondary rate limit",
+        "exceeded a rate limit", "abuse detection"))
 
 
 def checked_version(value):
@@ -64,19 +158,64 @@ class _HTTPSRedirects(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def open_https(url, timeout=15):
+def open_https(url, timeout=15, *, headers=None):
+    global _api_retry_at, _api_retry_code
     if not url.startswith((API_ROOT + "/", f"https://github.com/{REPOSITORY}/releases/download/")):
         raise UpdateSecurityError("Untrusted update URL")
-    req = urllib.request.Request(url, headers={"User-Agent": "SSHDriveMgr-Updater"})
-    return urllib.request.build_opener(_HTTPSRedirects()).open(req, timeout=timeout)
+    request_headers = {"User-Agent": "SSHDriveMgr-Updater"}
+    if headers is not None:
+        if not isinstance(headers, dict):
+            raise UpdateSecurityError("Invalid update request headers")
+        for name, value in headers.items():
+            # Conditional public metadata only; never credentials or UA overrides.
+            if (not isinstance(name, str) or name.lower() != "if-none-match"
+                    or not _safe_header_value(value)):
+                raise UpdateSecurityError("Invalid update conditional request header")
+            request_headers["If-None-Match"] = value
+    req = urllib.request.Request(url, headers=request_headers)
+    if not url.startswith(API_ROOT + "/"):
+        return urllib.request.build_opener(_HTTPSRedirects()).open(req, timeout=timeout)
+    # Serialize API request admission and response-header handling so a newly
+    # observed limit cannot race another request past an active deadline.
+    with _api_rate_limit_lock:
+        now = time.time()
+        if now < _api_retry_at:
+            raise UpdateRateLimitError(_api_retry_at, _api_retry_code)
+        try:
+            return urllib.request.build_opener(_HTTPSRedirects()).open(req, timeout=timeout)
+        except urllib.error.HTTPError as error:
+            now = time.time()
+            if not _is_rate_limit(error, now):
+                raise
+            _api_retry_at = _rate_limit_deadline(error.headers, now)
+            _api_retry_code = error.code
+            error.close()
+            raise UpdateRateLimitError(_api_retry_at, _api_retry_code) from error
 
 
-def fetch_release(url=LATEST_URL):
-    with open_https(url) as response:
-        data = json.loads(response.read(4 * 1024 * 1024 + 1).decode("utf-8"))
+def fetch_release(url=LATEST_URL, *, etag=None):
+    # Keep the no-header call compatible with security callers and simple mocks.
+    response = (open_https(url) if etag is None else
+                open_https(url, headers={"If-None-Match": etag}))
+    with response as stream:
+        raw = stream.read(_RELEASE_BYTES + 1)
+        if len(raw) > _RELEASE_BYTES:
+            raise UpdateSecurityError("GitHub release metadata is too large")
+        data = json.loads(raw.decode("utf-8"))
+        response_etag = _response_header(getattr(stream, "headers", None), "ETag")
     if not isinstance(data, dict) or data.get("draft"):
         raise UpdateSecurityError("Invalid or draft GitHub release")
+    # This private transport metadata is never trusted when supplied in JSON.
+    data.pop("_response_etag", None)
+    if _safe_header_value(response_etag) and _ETAG.fullmatch(response_etag):
+        data["_response_etag"] = response_etag
     return data
+
+
+def fetch_latest_release():
+    """Discovery-only checker; apply always uses authoritative fetch_release."""
+    from src.update_check import fetch_latest_release as check_latest_release
+    return check_latest_release()
 
 
 def _asset_identity(asset, tag):

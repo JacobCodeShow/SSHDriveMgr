@@ -40,7 +40,7 @@ def runtime(tmp_path, installed=False, onedir=False, frozen=True):
 def test_checker_selects_only_matching_distribution(tmp_path, installed, onedir, frozen, kind, asset):
     namespace = runtime(tmp_path, installed, onedir, frozen)
     manager = namespace["UpdaterManager"]("1.0.0")
-    with mock.patch.object(security, "fetch_release", return_value=release_fixture()):
+    with mock.patch.object(security, "fetch_latest_release", return_value=release_fixture()):
         manager.check_for_updates_async()
     manager.check_failed.emit.assert_not_called()
     args = manager.update_available.emit.call_args.args
@@ -54,7 +54,7 @@ def test_checker_selects_only_matching_distribution(tmp_path, installed, onedir,
 def test_onedir_zip_is_browser_only_and_never_armed_or_staged(tmp_path):
     namespace = runtime(tmp_path, onedir=True)
     manager = namespace["UpdaterManager"]("1.0.0")
-    with mock.patch.object(security, "fetch_release", return_value=release_fixture()):
+    with mock.patch.object(security, "fetch_latest_release", return_value=release_fixture()):
         manager.check_for_updates_async()
     with mock.patch.object(security, "resolve_release") as resolve:
         manager.download_update_async(security.release_asset_url("v" + VERSION, ZIP_NAME))

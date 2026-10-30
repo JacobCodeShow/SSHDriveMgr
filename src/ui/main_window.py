@@ -3733,7 +3733,7 @@ class MainWindow(FramelessMainWindow):
         self._sf_updater = updater  # keep alive until callbacks fire
 
         def _reset_btn():
-            if btn:
+            if btn is not None and not sip.isdeleted(btn):
                 btn.setEnabled(True)
                 btn.setText(tr("settings.check_updates"))
 

@@ -38,6 +38,15 @@ _ATTEMPT_NAME = "update_attempt.json"
 _HANDOVER_ERROR = ""
 
 
+def update_error_message(error: Exception) -> str:
+    if isinstance(error, security.UpdateRateLimitError):
+        from src.i18n import tr
+        retry_at = time.strftime("%Y-%m-%d %H:%M", time.localtime(error.retry_at))
+        return tr("settings.update.rate_limited", retry_at=retry_at,
+                  url=f"https://github.com/{security.REPOSITORY}/releases/latest")
+    return str(error)
+
+
 def get_update_handover_error() -> str:
     """User-facing reason for the last rejected handover (for dialog/startup UI)."""
     return _HANDOVER_ERROR
@@ -119,6 +128,10 @@ def matching_release_asset(data: dict, release_version: str) -> tuple[str, str, 
     security.checked_version(release_version)
     if data.get("tag_name") not in (release_version, "v" + release_version):
         raise security.UpdateSecurityError("Release tag does not match the update version")
+    if data.get("_discovery_only"):
+        # The public website can identify a version, not authorize a payload.
+        tag = data["tag_name"]
+        return "", f"https://github.com/{security.REPOSITORY}/releases/tag/{tag}", "rate_limited"
     kind = runtime_update_type()
     name = {
         "installer": f"SSHDriveMgr-Setup-{release_version}.exe",
@@ -332,6 +345,8 @@ def launch_pending_installer(record: dict, from_version: str = "") -> bool:
             "Writable AppData payloads/helpers must not run elevated.")
     try:
         payload, official = security.verify_for_apply(updates_dir(), record)
+    except security.UpdateRateLimitError as error:
+        return _handover_failure(update_error_message(error))
     except Exception as error:
         return _handover_failure(f"Update integrity validation failed; download again: {error}")
     update_file = str(payload)
@@ -485,8 +500,8 @@ def maybe_install_pending_update(current_version: str) -> bool:
 # ── Update check / download ─────────────────────────────────────────────────
 
 class UpdaterManager(QObject):
-    # version, changelog, URL, type: installer | portable_exe | onedir_zip | browser.
-    # onedir_zip is a browser/manual download, never an executable handover.
+    # version, changelog, URL, type: installer | portable_exe | onedir_zip |
+    # browser | rate_limited. Only the first two permit automatic handover.
     update_available = pyqtSignal(str, str, str, str)
     no_update_available = pyqtSignal()
     check_failed = pyqtSignal(str)
@@ -505,6 +520,7 @@ class UpdaterManager(QObject):
         self._changelog = ""
         self._is_downloading = False
         self._is_handing_over = False
+        self._is_checking = False
 
     def launch_pending_update_async(self):
         """Refresh remote metadata and hash in a worker, never on the GUI thread."""
@@ -535,10 +551,14 @@ class UpdaterManager(QObject):
         return get_pending_update(self.current_version)
 
     def check_for_updates_async(self):
-        """Checks in the background whether a new version is available."""
+        """Discover updates without allowing duplicate checks on this manager."""
+        if self._is_checking:
+            return
+        self._is_checking = True
+
         def _worker():
             try:
-                data = security.fetch_release()
+                data = security.fetch_latest_release()
                 security.checked_version(data.get("tag_name", "").removeprefix("v"))
 
                 latest_version_tag = data.get("tag_name", "").lstrip("v")
@@ -549,6 +569,9 @@ class UpdaterManager(QObject):
                 # Compare versions using packaging.version for proper semantic versioning
                 if version.parse(latest_version_tag) > version.parse(self.current_version):
                     changelog = data.get("body", "No changelog available.")
+                    if data.get("_discovery_only"):
+                        from src.i18n import tr
+                        changelog = tr("update.rate_limited.details")
                     asset_name, download_url, obj_type = matching_release_asset(data, latest_version_tag)
 
                     self.latest_version = latest_version_tag
@@ -562,11 +585,17 @@ class UpdaterManager(QObject):
             except Exception as e:
                 logger.warning(f"Failed to check for updates: {e}")
                 try:
-                    self.check_failed.emit(str(e))
+                    self.check_failed.emit(update_error_message(e))
                 except Exception:
                     pass
+            finally:
+                self._is_checking = False
 
-        threading.Thread(target=_worker, daemon=True).start()
+        try:
+            threading.Thread(target=_worker, daemon=True).start()
+        except Exception as error:
+            self._is_checking = False
+            self.check_failed.emit(update_error_message(error))
 
     def download_update_async(self, download_url: str):
         if (self._asset_type not in ("installer", "portable_exe")
@@ -601,7 +630,7 @@ class UpdaterManager(QObject):
                 except Exception:
                     pass
                 self.update_file_path = None
-                self.download_finished.emit(False, str(e))
+                self.download_finished.emit(False, update_error_message(e))
             finally:
                 self._is_downloading = False
 

@@ -64,10 +64,12 @@ class UpdateDialog(FramelessDialog):
         title.setObjectName("dialogTitle")
         hero_l.addWidget(title)
 
-        lead_key = ("update.onedir.lead" if self.obj_type == "onedir_zip" else
+        lead_key = ("update.rate_limited.lead" if self.obj_type == "rate_limited" else
+                    "update.onedir.lead" if self.obj_type == "onedir_zip" else
                     "update.browser.lead" if self.obj_type == "browser" else
                     "update.ready_lead" if self._downloaded else "update.lead")
         self.lead = QLabel(tr(lead_key))
+        self.lead.setTextFormat(Qt.TextFormat.PlainText)
         self.lead.setObjectName("dialogLead")
         self.lead.setWordWrap(True)
         hero_l.addWidget(self.lead)
@@ -220,6 +222,8 @@ class UpdateDialog(FramelessDialog):
             self.install_btn.setEnabled(True)
             self.install_btn.setText(tr("update.btn.install_now"))
         else:
+            if msg:
+                self.lead.setText(msg)
             self.install_btn.setText(tr("update.btn.download_failed"))
             self.install_btn.setEnabled(True)
             self.browser_btn.setEnabled(True)
