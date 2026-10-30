@@ -21,6 +21,12 @@
 AppId={{#MyAppId}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
+; Fixed PE versions are four-part numbers; display strings match src/version.txt.
+; AppVersion alone does not set every VERSIONINFO field on all Inno versions.
+VersionInfoVersion={#MyAppVersion}.0
+VersionInfoProductVersion={#MyAppVersion}.0
+VersionInfoTextVersion={#MyAppVersion}
+VersionInfoProductTextVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}

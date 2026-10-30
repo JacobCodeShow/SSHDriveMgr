@@ -310,6 +310,8 @@ def test_manual_checkout_and_both_workflow_native_commands_are_checked():
         assert 'SSHDriveMgr-Setup-$version.exe' in text
         assert r'run: .\build_dual.ps1 all -SkipStartupCheck' in text
         assert r'run: .\installer\build_installer.ps1 -SkipBuild' in text
+        assert text.index('- name: Install Inno Setup') < text.index('- name: Run tests')
+        assert text.index('- name: Run tests') < text.index('- name: Build executables')
         for run in workflow_runs(path):
             lines = run.splitlines()
             for index, line in enumerate(lines):

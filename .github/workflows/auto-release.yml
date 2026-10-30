@@ -48,6 +48,13 @@ jobs:
           python -m pip install -r requirements.txt pyinstaller pytest
           if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
 
+      # Run native installer metadata regression before expensive executable builds.
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup -y
+          if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed' }
+
       - name: Run tests
         shell: pwsh
         run: |
@@ -69,12 +76,6 @@ jobs:
           Compress-Archive -Path 'dist/SSHDriveMgr-onedir/*' -DestinationPath $zip -CompressionLevel Optimal
           if ((Get-Item -LiteralPath $zip).Length -le 0) { throw 'Empty onedir archive' }
           "ONEDIR_ZIP=$zip" >> $env:GITHUB_ENV
-
-      - name: Install Inno Setup
-        shell: pwsh
-        run: |
-          choco install innosetup -y
-          if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed' }
 
       - name: Build installer
         shell: pwsh
