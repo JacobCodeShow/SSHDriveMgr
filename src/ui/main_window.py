@@ -2499,21 +2499,9 @@ class MainWindow(FramelessMainWindow):
     def _build_edit_form(self, conn):
         """Build add/edit form inside right panel content area."""
         from src.drive_utils import get_available_drives
+        from src.ui.widgets.connection_form_layout import build_connection_form_field as _ef_field
 
         is_edit = conn is not None
-
-        def _ef_field(label_text, input_widget):
-            container = QFrame()
-            container.setObjectName("rpInfoField")
-            container.setFixedHeight(54)
-            vl = QVBoxLayout(container)
-            vl.setContentsMargins(16, 8, 16, 8)
-            vl.setSpacing(4)
-            lbl = QLabel(label_text.upper())
-            lbl.setObjectName("rpFieldLabelCaps")
-            vl.addWidget(lbl)
-            vl.addWidget(input_widget)
-            return container
 
         def _ef_field_pair(label1, widget1, label2, widget2, s1=2, s2=1):
             wrapper = QWidget()
@@ -2625,12 +2613,12 @@ class MainWindow(FramelessMainWindow):
         icon_lbl.setObjectName("rpFieldLabelCaps")
         icon_vl.addWidget(icon_lbl)
         # Scrollable icon grid – presets + user-imported SVGs + add button.
-        # Shows ~2 rows by default; vertical scroll kicks in when more icons exist.
+        # The viewport below fits three complete rows; only larger custom sets scroll.
         self._ef_icon_scroll = QScrollArea()
         self._ef_icon_scroll.setWidgetResizable(True)
         self._ef_icon_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._ef_icon_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._ef_icon_scroll.setMinimumHeight(92)
+        self._ef_icon_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._ef_icon_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
         self._ef_icon_scroll.viewport().setAutoFillBackground(False)
         self._ef_rebuild_icon_grid()
@@ -4386,6 +4374,8 @@ class MainWindow(FramelessMainWindow):
         grid.addWidget(add_btn, row, col)
 
         self._ef_icon_scroll.setWidget(icon_grid)
+        from src.ui.widgets.connection_form_layout import icon_grid_viewport_height
+        self._ef_icon_scroll.setFixedHeight(icon_grid_viewport_height(len(icon_names)))
 
     def _ef_import_custom_icon(self):
         """Open file picker to import a user SVG icon into config_dir/custom_icons/."""
@@ -5448,7 +5438,7 @@ class MainWindow(FramelessMainWindow):
             if widget is not None and hasattr(widget, "set_theme"):
                 widget.set_theme(theme)
         if self._panel_mode in (_PANEL_ADD, _PANEL_EDIT) and hasattr(self, "_ef_icon_scroll"):
-            self._ef_refresh_icon_grid()
+            self._ef_rebuild_icon_grid()
         for conn_id, card in list(self._cards.items()):
             card.set_theme(theme)
             self._update_card_terminal_indicator(conn_id)

@@ -8,6 +8,11 @@ from src.config import Connection
 from src.sshfs_controller import SSHFSController, _find_sshfs_pid_for_drive
 
 
+@pytest.fixture(autouse=True)
+def _isolate_cygwin_environment(monkeypatch):
+    monkeypatch.delenv("CYGWIN", raising=False)
+
+
 class _FakeProcessInfo:
     def __init__(self, pid, name, cmdline):
         self.info = {"pid": pid, "name": name, "cmdline": cmdline}
@@ -68,7 +73,11 @@ def test_find_sshfs_pid_rejects_invalid_drive_letters(monkeypatch, drive_letter)
 def test_direct_mount_uses_parent_independent_stdio_and_stable_drive(
     monkeypatch, tmp_path
 ):
-    key_path = tmp_path / "id_ed25519"
+    monkeypatch.setenv("CYGWIN", "nodosfilewarning winsymlinks:native")
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "profile with spaces"))
+    key_dir = tmp_path / "keys with spaces"
+    key_dir.mkdir()
+    key_path = key_dir / "id_ed25519"
     key_path.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n", encoding="utf-8")
     conn = Connection(
         name="Server",
@@ -80,9 +89,13 @@ def test_direct_mount_uses_parent_independent_stdio_and_stable_drive(
     )
     proc = _RunningProcess()
     popen = Mock(return_value=proc)
+    encode = sshfs_controller.cygwin_command_line
+    serializer = Mock(wraps=encode)
+    monkeypatch.setattr(sshfs_controller, "cygwin_command_line", serializer)
     drive_states = iter([False, False, True, True, True])
     _CapturedThread.created.clear()
-    monkeypatch.setattr(sshfs_controller, "_find_sshfs_exe", lambda: r"C:\sshfs.exe")
+    executable = r"C:\Program Files\SSHFS-Win\bin\sshfs.exe"
+    monkeypatch.setattr(sshfs_controller, "_find_sshfs_exe", lambda: executable)
     monkeypatch.setattr(
         sshfs_controller,
         "_drive_letter_in_use",
@@ -96,16 +109,113 @@ def test_direct_mount_uses_parent_independent_stdio_and_stable_drive(
     result = controller._mount_direct(conn)
 
     assert result.success is True
-    cmd = popen.call_args.args[0]
+    serializer.assert_called_once()
+    cmd = serializer.call_args.args[0]
+    assert isinstance(cmd, list)
+    assert cmd[:3] == [executable, "alice@example.test:/", "X:"]
+    assert isinstance(popen.call_args.args[0], str)
+    assert popen.call_args.args[0] == encode(cmd)
+    assert popen.call_args.kwargs["executable"] == executable
+    assert popen.call_args.kwargs["shell"] is False
     assert "-f" in cmd
     assert "-odebug" not in cmd
     assert "-ologlevel=debug1" not in cmd
+    assert all(option in cmd for option in ("-oidmap=user", "-ouid=-1", "-ogid=-1",
+                                           "-odefault_permissions", "-oStrictHostKeyChecking=accept-new"))
+    assert not any(option.startswith(("-oumask=", "-ocreate_umask=", "-oallow_other",
+                                     "-ouidmap=", "-oUserName=", "-oGroupName=", "-oFileSecurity="))
+                   for option in cmd)
+    known_hosts = sshfs_controller._ssh_config_path(
+        sshfs_controller.os.path.expanduser("~\\.ssh\\known_hosts"))
+    assert f"-oUserKnownHostsFile={known_hosts}" in cmd
+    assert f"-oIdentityFile={sshfs_controller._ssh_config_path(str(key_path))}" in cmd
+    assert "-oPreferredAuthentications=publickey" in cmd
+    assert popen.call_args.kwargs["stdin"] is sshfs_controller.subprocess.DEVNULL
     assert popen.call_args.kwargs["stdout"] is sshfs_controller.subprocess.DEVNULL
     assert popen.call_args.kwargs["stderr"] is sshfs_controller.subprocess.DEVNULL
+    assert popen.call_args.kwargs["creationflags"] == 0x08000000
+    assert popen.call_args.kwargs["env"]["CYGWIN"] == "nodosfilewarning winsymlinks:native"
+    assert sshfs_controller.os.environ["CYGWIN"] == "nodosfilewarning winsymlinks:native"
     assert controller._get_mount_process("X:") is proc
 
     _CapturedThread.created[0].target()
     assert proc.wait_calls == 1
+    assert controller._get_mount_process("X:") is None
+
+
+def _offline_password_mount(monkeypatch, tmp_path):
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "fake-profile"))
+    conn = Connection("Server", "never-connect.invalid", "alice", auth_method="password",
+                      password="offline-fake-only", drive_letter="X:")
+    proc = _RunningProcess()
+    proc.stdin = SimpleNamespace(write=Mock(), flush=Mock(), close=Mock())
+    popen = Mock(return_value=proc)
+    serializer = Mock(wraps=sshfs_controller.cygwin_command_line)
+    drive_states = iter([False, False, True, True, True])
+    _CapturedThread.created.clear()
+    monkeypatch.setattr(sshfs_controller, "_find_sshfs_exe", lambda: r"C:\sshfs.exe")
+    monkeypatch.setattr(sshfs_controller, "_drive_letter_in_use", lambda _letter: next(drive_states))
+    monkeypatch.setattr(sshfs_controller, "cygwin_command_line", serializer)
+    monkeypatch.setattr(sshfs_controller.subprocess, "Popen", popen)
+    monkeypatch.setattr(sshfs_controller.threading, "Thread", _CapturedThread)
+    monkeypatch.setattr(sshfs_controller.time, "sleep", lambda _seconds: None)
+    return SSHFSController(), conn, proc, popen, serializer
+
+
+def test_raw_cygwin_launch_preserves_password_stdin_cleanup(monkeypatch, tmp_path):
+    controller, conn, proc, popen, serializer = _offline_password_mount(monkeypatch, tmp_path)
+
+    result = controller._mount_direct(conn)
+
+    assert result.success is True
+    cmd = serializer.call_args.args[0]
+    assert "-opassword_stdin" in cmd
+    assert "-oPreferredAuthentications=password,keyboard-interactive" in cmd
+    assert "offline-fake-only" not in popen.call_args.args[0]
+    assert isinstance(popen.call_args.args[0], str)
+    assert popen.call_args.kwargs["executable"] == r"C:\sshfs.exe"
+    assert popen.call_args.kwargs["shell"] is False
+    assert popen.call_args.kwargs["stdin"] is sshfs_controller.subprocess.PIPE
+    assert popen.call_args.kwargs["stdout"] is sshfs_controller.subprocess.DEVNULL
+    assert popen.call_args.kwargs["stderr"] is sshfs_controller.subprocess.DEVNULL
+    assert popen.call_args.kwargs["creationflags"] == 0x08000000
+    proc.stdin.write.assert_called_once_with(b"offline-fake-only\n")
+    proc.stdin.flush.assert_called_once_with()
+    proc.stdin.close.assert_called_once_with()
+    assert controller._get_mount_process("X:") is proc
+
+
+@pytest.mark.parametrize("cygwin", ["noglob", "nodosfilewarning noglob", "noglob:ignorecase",
+                                    "nodosfilewarning\tNOGLOB:case fake-sensitive-marker"])
+def test_unsupported_cygwin_noglob_fails_before_serialization_or_popen(monkeypatch, tmp_path, cygwin):
+    controller, conn, proc, popen, serializer = _offline_password_mount(monkeypatch, tmp_path)
+    monkeypatch.setenv("CYGWIN", cygwin)
+
+    result = controller._mount_direct(conn)
+
+    assert result.success is False
+    assert "default glob" in result.message
+    assert "noglob" in result.message
+    assert "fake-sensitive-marker" not in result.message
+    popen.assert_not_called()
+    serializer.assert_not_called()
+    proc.stdin.write.assert_not_called()
+    assert not proc.killed
+    assert sshfs_controller.os.environ["CYGWIN"] == cygwin
+    assert controller._get_mount_process("X:") is None
+
+
+def test_cygwin_serializer_rejection_fails_before_popen(monkeypatch, tmp_path):
+    controller, conn, proc, popen, serializer = _offline_password_mount(monkeypatch, tmp_path)
+    serializer.side_effect = ValueError("unsupported argv configuration")
+
+    result = controller._mount_direct(conn)
+
+    assert result.success is False
+    assert "unsupported argv configuration" in result.message
+    popen.assert_not_called()
+    proc.stdin.write.assert_not_called()
+    assert not proc.killed
     assert controller._get_mount_process("X:") is None
 
 

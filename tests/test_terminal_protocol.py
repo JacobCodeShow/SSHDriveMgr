@@ -639,13 +639,22 @@ def test_sshfs_key_path_with_spaces_reaches_ssh_config_parser(monkeypatch, tmp_p
     proc.poll.return_value = None
     popen = Mock(return_value=proc)
     drive_states = iter([False, False, True, True, True])
-    monkeypatch.setattr(sshfs_controller, "_find_sshfs_exe", lambda: "sshfs.exe")
+    recorded = []
+    serialize = sshfs_controller.cygwin_command_line
+    def record_arguments(arguments):
+        recorded.append(list(arguments))
+        return serialize(arguments)
+    monkeypatch.setattr(sshfs_controller, "cygwin_command_line", record_arguments)
+    monkeypatch.setattr(sshfs_controller, "_find_sshfs_exe", lambda: r"C:\sshfs.exe")
     monkeypatch.setattr(sshfs_controller, "_drive_letter_in_use", lambda letter: next(drive_states))
     monkeypatch.setattr(sshfs_controller.subprocess, "Popen", popen)
     monkeypatch.setattr(sshfs_controller.threading, "Thread", lambda **kwargs: SimpleNamespace(start=lambda: None))
     monkeypatch.setattr(sshfs_controller.time, "sleep", lambda seconds: None)
     assert sshfs_controller.SSHFSController()._mount_direct(conn).success
-    args = popen.call_args.args[0]
+    args = recorded[0]
+    assert isinstance(popen.call_args.args[0], str)
+    assert popen.call_args.kwargs["executable"] == r"C:\sshfs.exe"
+    assert popen.call_args.args[0] == serialize(args)
     identity = next(arg[2:] for arg in args if arg.startswith("-oIdentityFile="))
     known_hosts = next(arg[2:] for arg in args if arg.startswith("-oUserKnownHostsFile="))
     assert identity == 'IdentityFile="' + str(key).replace("\\", "/") + '"'

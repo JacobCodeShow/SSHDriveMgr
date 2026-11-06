@@ -18,6 +18,7 @@ import psutil
 from ctypes import wintypes
 from dataclasses import dataclass
 from src.config import Connection
+from src.cygwin_argv import cygwin_command_line
 from src.utils.secure_memory import SecureBytes
 
 SSHFS_EXE_PATHS = [
@@ -358,8 +359,8 @@ class SSHFSController:
             "-oidmap=user",
             "-ouid=-1",
             "-ogid=-1",
-            "-oumask=000",
-            "-ocreate_umask=000",
+            # Keep remote mode bits; fixing argv must not activate masks that
+            # broaden directory/file permissions to 0777.
             "-odefault_permissions",
         ]
 
@@ -477,8 +478,18 @@ class SSHFSController:
             if _drive_letter_in_use(f"{letter}:"):
                 return MountResult(False, f"Laufwerksbuchstabe {letter}: ist bereits belegt.")
 
+            if any(token.split(":", 1)[0].lower() == "noglob"
+                   for token in env.get("CYGWIN", "").split()):
+                raise ValueError("SSHFS argument quoting requires Cygwin default glob mode; "
+                                 "remove noglob from the child CYGWIN configuration")
+            # Python's CRT list2cmdline escaping is not Cygwin's grammar: literal
+            # OpenSSH path quotes can otherwise swallow every following option.
+            # Pass the serialized STRING directly, with an explicit executable.
+            command_line = cygwin_command_line(cmd)
             proc = subprocess.Popen(
-                cmd,
+                command_line,
+                executable=sshfs_exe,
+                shell=False,
                 stdin=(
                     subprocess.PIPE
                     if conn.auth_method in ("password", "ask") and conn.password
